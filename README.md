@@ -1,7 +1,5 @@
 # 幻境 · AI 自生长交互式蜜罐
 
-![huanjing](asset/article_cover.png)
-
 根据攻击者的实时行为自动生成并演化站点，把静态诱饵变成会随攻击者动作持续生长的靶场进行长时间牵制：探路径就造页面，试登录就给假后台，越深入诱饵越多；同时用陷阱规则库、WebRTC 溯源与 Canary 回连留存完整攻击证据。
 
 控制台与靶站双端分离，全部能力通过 Web 界面操作，无需命令行。
@@ -126,7 +124,7 @@ python run.py
 
 打开 `http://127.0.0.1:9000/` 进入控制台。首次启动自动创建默认仿冒模板与默认靶站（8888）。
 
-建议上手顺序：**模型网关**配置 Provider → **仿冒模板**复刻站点 → **靶站管理**挂载端口 → 浏览器访问该端口 → 在**实时日志**与**站点文件树**观察生长结果。
+配置顺序：**模型网关**配置 Provider → **仿冒模板**复刻站点 → **靶站管理**挂载端口 → 浏览器访问该端口 → 在**实时日志**与**站点文件树**观察生长结果。
 
 未配置任何模型时系统仍可运行，生长与复刻自动走离线确定性模板（页面丰富度下降）。
 
@@ -144,7 +142,7 @@ python run.py
                               ├─ 噪声 → 404（不消耗模型额度）
                               └─ 探测/人工 → 计分 → 生长 → 返回新页面
    │
-   └─ 全量请求落库 → 会话画像 / 实时日志 / 导出 / LLM 研判
+   └─ 全量请求落库（报文脱敏）→ 会话画像 / Agent 行为研判 / 实时日志 / 导出 / LLM 研判
 ```
 
 静态资源单独回源，避免资源请求被误判为页面请求并生成 HTML 覆盖，导致前端脚本失效。
@@ -162,6 +160,69 @@ python run.py
 **事件总线**：主题化发布，`publish` 带短周期微聚合，`broadcast` 即时下发；控制台经 `/sse/stream` 单连接订阅，前端多消费者复用。
 
 ---
+## 整体架构
+```mermaid
+flowchart TB
+    subgraph ACCESS["接入层"]
+        RUN["run.py 启动器<br/>控制台 + 多靶站"]
+        SITE["app_site.py 靶站入口<br/>端口 → 站点 → 克隆"]
+        CON["app_console.py 管理 API / SSE"]
+        CMN["common_routes.py 共享路由<br/>Canary 回连"]
+        INST["instances.py 靶站实例子进程"]
+    end
+
+    subgraph PIPE["请求处理层"]
+        ENG["engine.py 请求管线<br/>会话 → 陷阱优先 → 落库"]
+        TRAP["traps.py 陷阱匹配 / 应答 / 自动编排"]
+        CLS["classifier.py 意图判定<br/>噪声 vs 探测"]
+        GROW["growth.py 页面生长 + DLP 净化"]
+        AGD["agentdetect.py Agent 行为检测与研判"]
+        RED["redaction.py 报文脱敏<br/>口令 / Token / Header"]
+        WM["watermark.py 零宽水印 / Canary"]
+    end
+
+    subgraph MODEL["模型与复刻"]
+        LLM["llm_gateway.py 模型网关"]
+        CHAT["llm_chat.py 控制台对话与研判"]
+        CLONE["clone_runner.py · cloner.py<br/>站点复刻流水线"]
+    end
+
+    subgraph INFRA["存储与总线"]
+        STORE["store.py SQLite 分库<br/>站点 / 日志 / 会话 / 配置 / 资产"]
+        BUS["events.py 事件总线 → SSE"]
+        LIVE["livelog.py 实时日志尾读"]
+    end
+
+    RUN --> SITE
+    RUN --> CON
+    SITE --> CMN
+    CON --> CMN
+    SITE --> ENG
+    ENG --> TRAP
+    ENG --> CLS
+    ENG --> GROW
+    ENG --> AGD
+    ENG --> RED
+    ENG --> WM
+    ENG --> STORE
+    TRAP --> STORE
+    TRAP --> BUS
+    TRAP --> GROW
+    GROW --> LLM
+    GROW --> STORE
+    AGD --> STORE
+    AGD --> BUS
+    RED --> STORE
+    LLM --> STORE
+    CON --> CHAT
+    CHAT --> LLM
+    CON --> LIVE
+    CON --> CLONE
+    CON --> INST
+    SITE --> INST
+    CLONE --> GROW
+    CLONE --> LLM
+```
 
 ## 目录结构
 
@@ -174,15 +235,22 @@ ai-honeypot/
 ├── honeypot/
 │   ├── app_console.py        控制台入口与管理 API
 │   ├── app_site.py           靶站入口
+│   ├── common_routes.py      控制台/靶站共享路由（Canary 回连）
 │   ├── engine.py             请求主链路
 │   ├── traps.py              陷阱匹配 / 应答策略 / 自动编排
+│   ├── classifier.py         意图判定（噪声 / 探测）
 │   ├── growth.py             页面生长与离线降级
+│   ├── agentdetect.py        Agent 行为检测与研判
+│   ├── redaction.py          报文脱敏（口令 / Token / Header）
+│   ├── clone_runner.py       复刻任务编排
 │   ├── cloner.py             复刻流水线与模板变形
 │   ├── instances.py          靶站实例与文件管理
 │   ├── livelog.py            实时日志尾读
+│   ├── llm_chat.py           控制台对话与研判
 │   ├── llm_gateway.py        模型网关
 │   ├── store.py              分库存储
 │   ├── events.py             事件总线
+│   ├── config.py             环境变量与阈值配置
 │   └── watermark.py          零宽水印与 Canary
 ├── asset/                    README 截图
 ├── tests/
