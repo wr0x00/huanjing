@@ -1,0 +1,338 @@
+# 出厂陷阱库 —— 顺序即匹配优先级（靠前优先命中）
+# 设计原则：贴近真实攻防中高价值攻击面，命中后可引导攻击者深入（而非一眼假的低难度诱饵）
+# 覆盖：源码仓库 / IDE / CI-CD / 接口文档 / 框架调试端点 / 中间件配置 / 日志 / 容器编排 /
+#       备份凭据复用 / 令牌线索 / 认证链（弱口令→MFA→后台）/ 注入类攻击特征
+traps:
+  # ---------- Agent 行为观测：只提供虚构挑战，不执行命令或访问外部系统 ----------
+  - id: t_agent_client_fingerprint
+    name: Agent 客户端候选标记（低置信度）
+    match:
+      path_glob: ["/robots.txt"]
+      method: GET
+      header_any:
+        - "artex-enrich/1.0"
+        - "compatible; artex/1.0"
+        - "scopeweaver"
+        - "spa-api-recon"
+        - "cyberstrikeai-webshell/1.0"
+        - "hexstrike-http-framework/1.0"
+        - "hexstrike-browseragent/1.0"
+        - "x-id-token"
+    respond:
+      strategy: static
+      file: agent_robots
+
+  - id: t_agent_semantic_probe
+    name: 隔离语义诱饵（合成任务标记）
+    match: { path_glob: ["/internal/agent-task.txt"], method: GET }
+    respond:
+      strategy: static
+      file: agent_task
+
+  - id: t_agent_result_probe
+    name: Agent 结果依赖探针（合成状态数据）
+    match: { path_glob: ["/api/internal/audit-status"], method: GET }
+    respond:
+      strategy: static
+      file: agent_audit_status
+
+  # ---------- 源码仓库与开发者环境泄漏 ----------
+  - id: t_git_config
+    name: Git 仓库配置泄漏（.git/config）
+    match: { path_glob: ["/.git/config", "/.git/config.*"], method: GET }
+    respond:
+      strategy: static
+      file: git_config
+      inject_canary: true
+
+  - id: t_git_refs
+    name: Git 引用与提交历史泄漏（HEAD/packed-refs/logs）
+    match:
+      path_glob: ["/.git/HEAD", "/.git/packed-refs", "/.git/logs/HEAD", "/.git/index",
+                  "/.git/refs/heads/*", "/.git/description", "/.git/COMMIT_EDITMSG"]
+      method: GET
+    respond:
+      strategy: static
+      file: git_head
+
+  - id: t_ide_workspace
+    name: IDE 工作区配置泄漏（.idea/.vscode）
+    match:
+      path_glob: ["/.idea/*", "/*.iml", "/.vscode/*", "/.idea", "/project.private.config"]
+      method: GET
+    respond:
+      strategy: static
+      file: ide_workspace
+      inject_canary: true
+
+  - id: t_ci_config
+    name: CI/CD 流水线配置泄漏（GitLab/Jenkins）
+    match:
+      path_glob: ["/.gitlab-ci.yml", "/Jenkinsfile", "/azure-pipelines.yml",
+                  "/.github/workflows/*", "/.drone.yml", "/.circleci/config.yml"]
+      method: GET
+    respond:
+      strategy: static
+      file: gitlab_ci
+      inject_canary: true
+
+  - id: t_docker_config
+    name: Docker 仓库凭据泄漏（.docker/config.json）
+    match: { path_glob: ["/.docker/config.json"], method: GET }
+    respond:
+      strategy: static
+      file: docker_config
+      inject_canary: true
+
+  - id: t_sourcemap
+    name: 前端 SourceMap 泄漏（硬编码密钥）
+    match: { path_glob: ["/*.js.map", "/*.css.map"], method: GET }
+    respond:
+      strategy: static
+      file: source_map
+      inject_canary: true
+
+  # ---------- 接口文档与调试端点 ----------
+  - id: t_swagger_api
+    name: Swagger/OpenAPI 文档暴露（内部端点全量可见）
+    match:
+      path_glob: ["/v2/api-docs", "/v3/api-docs", "/openapi.json", "/api-docs",
+                  "/swagger.json", "/api/swagger.json", "/openapi.yaml"]
+      method: GET
+    respond:
+      strategy: static
+      file: swagger_api
+      inject_canary: true
+
+  - id: t_swagger_ui
+    name: Swagger UI 调试页暴露
+    match: { path_glob: ["/swagger-ui.html", "/swagger-ui/*", "/doc.html", "/apidocs/*"], method: GET }
+    respond:
+      strategy: static
+      file: swagger_ui
+
+  - id: t_openapi_json
+    name: OpenAPI v3 文档暴露（商户结算与回调端点）
+    match: { path_glob: ["/openapi/v3/*", "/api/openapi.json", "/swagger/v3/*"], method: GET }
+    respond:
+      strategy: static
+      file: openapi_json
+      inject_canary: true
+
+  - id: t_phpinfo
+    name: phpinfo 调试页暴露（路径与禁用函数）
+    match: { path_glob: ["/phpinfo.php", "/info.php", "/php_info.php", "/test.php"], method: GET }
+    respond:
+      strategy: static
+      file: phpinfo
+
+  - id: t_actuator
+    name: Spring Boot Actuator 端点暴露（env 含明文口令）
+    match: { path_glob: ["/actuator", "/actuator/*", "/manage/*", "/admin/actuator/*"], method: GET }
+    respond:
+      strategy: static
+      file: actuator_env
+      inject_canary: true
+
+  # ---------- 中间件与服务配置 ----------
+  - id: t_nginx_conf
+    name: Nginx 反代配置泄漏（内网 upstream）
+    match:
+      path_glob: ["/nginx.conf", "/conf/nginx.conf", "/etc/nginx/*", "/server/nginx.conf",
+                  "/.nginx.conf"]
+      method: GET
+    respond:
+      strategy: static
+      file: nginx_conf
+      inject_canary: true
+
+  - id: t_nginx_status
+    name: Nginx 状态页暴露
+    match: { path_glob: ["/nginx_status", "/server-status", "/status"], method: GET }
+    respond:
+      strategy: static
+      file: nginx_status
+
+  - id: t_configmap
+    name: K8s ConfigMap / 应用配置泄漏（DB+OSS+JWT 明文）
+    match:
+      path_glob: ["/k8s/*", "/configmap.yaml", "/config/application*.yml",
+                  "/config/application*.yaml", "/config/config*.yml", "/bootstrap.yml"]
+      method: GET
+    respond:
+      strategy: static
+      file: configmap
+      inject_canary: true
+
+  # ---------- 运行时日志（凭据复用线索） ----------
+  - id: t_app_log
+    name: 应用日志泄漏（含内网地址与复用口令）
+    match:
+      path_glob: ["/logs/*.log", "/log/*.log", "/storage/logs/*.log", "/runtime/log/*.log",
+                  "/var/log/*.log", "/app/logs/*.log", "/logs/*"]
+      method: GET
+    respond:
+      strategy: static
+      file: app_log
+      inject_canary: true
+
+  - id: t_error_log
+    name: 错误日志泄漏（FastCGI/上游故障细节）
+    match:
+      path_glob: ["/error.log", "/logs/error*.log", "/error_log", "/stderr.log", "/logs/stderr*"]
+      method: GET
+    respond:
+      strategy: static
+      file: error_log
+      inject_canary: true
+
+  # ---------- 备份与凭据复用 ----------
+  - id: t_backup_db
+    name: 数据库备份下载（凭据复用线索）
+    match:
+      path_glob: ["/*.sql.gz", "/*.sql", "/backup/*", "/dump/*", "/db_backup/*",
+                  "/mysql/*.sql", "/*.sql.zip"]
+      method: GET
+    respond:
+      strategy: canary_download
+      watermark: true
+
+  - id: t_backup_archive
+    name: 站点打包备份泄漏（源码与配置一起打包）
+    match:
+      path_glob: ["/backup.zip", "/www.zip", "/site.zip", "/dist.zip", "/web.zip",
+                  "/backup.tar.gz", "/src.zip", "/starlan.zip"]
+      method: GET
+    respond:
+      strategy: custom
+      media_type: text/plain
+      body: |
+        403 Forbidden
+        Nginx/1.22.1
+
+        本资源需登录后下载：https://starlan.example/auth/download?ticket=7f3a91c2
+        （票据有效期 15 分钟，登录后可下载 2024-11 站点归档包）
+
+  # ---------- 令牌与会话线索 ----------
+  - id: t_token_leak
+    name: 调试接口泄漏会话令牌（JWT/refreshToken）
+    match:
+      path_glob: ["/debug/session", "/actuator/sessions", "/api/user/info",
+                  "/api/v1/session", "/_debug/session"]
+      method: GET
+    respond:
+      strategy: static
+      file: token_leak
+      inject_canary: true
+
+  # ---------- 认证链：弱口令 → MFA → 假后台 ----------
+  - id: t_admin_login
+    name: 后台登录（弱口令放行后转 MFA 二次验证）
+    match: { path_glob: ["/admin/login", "/admin/auth/login", "/console/login"], method: POST }
+    respond:
+      strategy: fake_login
+
+  - id: t_mfa_verify
+    name: MFA 二次验证提交（验证码捕获）
+    match: { path_glob: ["/admin/mfa/verify", "/admin/mfa/*", "/api/mfa/verify"], method: POST }
+    respond:
+      strategy: mfa_verify
+
+  - id: t_oauth_token
+    name: OAuth 令牌端点（client_secret 捕获）
+    match:
+      path_glob: ["/oauth/token", "/oauth2/token", "/connect/token", "/api/oauth/token"]
+      method: POST
+    respond:
+      strategy: credential_capture
+
+  - id: t_api_login
+    name: 业务登录接口凭据捕获（AJAX/JSON 提交）
+    match:
+      path_glob: ["*/login", "*/signin", "*/sign-in", "*/auth/login", "*/auth/token"]
+      method: POST
+      payload_sig: "password"
+    respond:
+      strategy: credential_capture
+
+  # ---------- 注入类攻击特征（高技术含量） ----------
+  - id: t_sqli
+    name: SQL 注入探测（报错回显含表结构）
+    match:
+      path_glob: ["/search", "*/search", "*/product*", "*/list", "*/category*", "*/goods*"]
+      method: GET
+      payload_any: "'|union|select|sleep(|benchmark(|information_schema|load_file|updatexml|extractvalue|into outfile"
+    respond:
+      strategy: sqli_echo
+      watermark: true
+
+  - id: t_ssti
+    name: 服务端模板注入探测（表达式求值回显）
+    match:
+      path_glob: ["*"]
+      method: GET
+      payload_any: "{{7*7}}|${7*7}|<%= 7*7 %>|{%25+7*7+%25}"
+    respond:
+      strategy: custom
+      media_type: text/html
+      body: |
+        <!DOCTYPE html><html><body>
+        <h2>商品详情</h2>
+        <p>价格：¥1299.00</p>
+        <p>库存：<b>37</b></p>
+        <!-- template eval result: 7777 (expected 1299) -->
+        </body></html>
+
+  - id: t_ssrf_metadata
+    name: 云元数据探测（SSRF 取 IAM 凭据）
+    match:
+      path_glob: ["*"]
+      method: GET
+      payload_any: "169.254.169.254|metadata.google.internal|100.100.100.200|metadata.azure.com"
+    respond:
+      strategy: static
+      file: cloud_metadata
+      inject_canary: true
+
+  - id: t_lfi
+    name: 本地文件包含/路径穿越（读取系统文件）
+    match:
+      path_glob: ["/index.php", "/download", "/file", "/read", "/static/*", "/attachment",
+                  "/preview", "/view", "/export"]
+      method: GET
+      payload_any: "../|%2e%2e/|....//"
+    respond:
+      strategy: static
+      file: lfi_passwd
+      inject_canary: true
+
+  - id: t_cmdinj
+    name: 命令注入探测（回显 id 与 whoami）
+    match:
+      path_glob: ["*"]
+      method: GET
+      payload_any: ";cat |cat /etc/passwd|$(cat |%0acat |nc -e|bash -i|whoami"
+    respond:
+      strategy: static
+      file: cmdinj_echo
+      inject_canary: true
+
+  - id: t_xxe
+    name: XXE 外部实体注入探测
+    match:
+      path_glob: ["*"]
+      method: POST
+      payload_any: "<!entity|<!doctype|system \"http"
+    respond:
+      strategy: static
+      file: xxe_error
+
+  - id: t_deser
+    name: 反序列化载荷探测（Java/PHP gadget 指纹）
+    match:
+      path_glob: ["*"]
+      method: POST
+      payload_any: "aced0005|rO0AB|java.lang.runtime|php/serialize|__reduce"
+    respond:
+      strategy: static
+      file: deser_probe

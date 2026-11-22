@@ -1,0 +1,1944 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>蜜罐指挥中心 · AI Honeypot</title>
+<link rel="stylesheet" href="/static/styles.css?v=10">
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/charts.js?v=2"></script>
+</head>
+<body>
+<div id="app" v-cloak :class="{collapsed: collapsed}">
+
+<!-- ============ 全局消息 ============ -->
+<div class="toasts">
+  <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type">
+    <span class="t-ico">{{ t.type==="ok" ? "✓" : t.type==="err" ? "✕" : "i" }}</span>{{ t.text }}
+  </div>
+</div>
+
+<!-- ============ 顶栏 ============ -->
+<header class="header">
+  <div class="header-logo">
+    <div class="logo-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 2.5 4 6.2v6.3c0 4.6 3.3 8.4 8 9 4.7-.6 8-4.4 8-9V6.2L12 2.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m8.6 12.1 2.3 2.4 4.6-4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="logo-text"><b>蜜罐指挥中心</b><span>AI Honeypot · Self-Growing</span></div>
+  </div>
+  <div class="header-body">
+    <div style="display:flex;align-items:center;min-width:0">
+      <span class="header-title">{{ cur.label }}</span>
+      <span class="header-sub" :title="live.last">{{ live.last }}</span>
+    </div>
+    <div class="header-actions">
+      <span class="chip" :class="live.connected ? 'ok' : 'err'"><span class="dot"></span>{{ live.connected ? "实时链路在线" : "链路重连中" }}</span>
+      <span class="chip primary">指挥模型：{{ cmdrName }}</span>
+      <button class="hbtn" @click="drawer=true" title="设置">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.6"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3H9.8l-.4 2.5a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.5h4.4l.4-2.5a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="hbtn" @click="applyTheme(theme==='dark'?'light':'dark')"
+        :title="theme==='dark' ? '切换到浅色' : '切换到深色'">
+        <svg v-if="theme==='dark'" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4 17 7M7 17l-1.6 1.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <svg v-else viewBox="0 0 24 24" fill="none"><path d="M20 14.2A8.2 8.2 0 0 1 9.8 4 8.4 8.4 0 1 0 20 14.2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ============ 侧栏 + 内容 ============ -->
+<div class="layout">
+  <aside class="sidebar">
+    <nav class="menu">
+      <template v-for="g in MENU" :key="g.label">
+        <div class="menu-group-label">{{ g.label }}</div>
+        <button v-for="it in g.items" :key="it.k" class="mi" :class="{active: page===it.k}"
+                @click="page=it.k" :title="it.desc">
+          <span class="mi-ico" v-html="it.icon"></span>
+          <span class="mi-label">{{ it.label }}</span>
+          <span class="mi-badge gray" v-if="it.k==='live'&&live.events.length">{{ live.events.length }}</span>
+        </button>
+      </template>
+    </nav>
+    <div class="side-foot">
+      <button class="mi" @click="collapsed=!collapsed" title="折叠/展开菜单">
+        <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h10M4 18h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span class="mi-label">{{ collapsed ? "展开菜单" : "收起菜单" }}</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <KeepAlive max="9"><component :is="cur.comp" :key="cur.k"/></KeepAlive>
+  </main>
+</div>
+
+<!-- ============ 设置抽屉 ============ -->
+<div v-if="drawer" class="drawer-mask" @click="drawer=false"></div>
+<div class="drawer" :class="{open:drawer}">
+  <div class="drawer-head"><h3>设置</h3>
+    <button class="btn btn-text" @click="drawer=false">关闭</button></div>
+  <div class="drawer-body">
+    <div class="field"><label>外观主题</label>
+      <div class="seg">
+        <div :class="{on:theme==='light'}" @click="applyTheme('light')">☀ 浅色</div>
+        <div :class="{on:theme==='dark'}" @click="applyTheme('dark')">☾ 深色</div>
+      </div></div>
+    <div class="field"><label>日志保留天数（数据包日志超期自动清理）</label>
+      <div class="row"><input type="number" class="input" v-model.number="retDays" min="1" max="365" style="width:110px">
+        <button class="btn btn-sm" :disabled="savingRet" @click="saveRet">{{savingRet?"保存中…":"保存"}}</button></div></div>
+    <div class="kv"><span>指挥模型</span><b>{{cmdrName}}</b></div>
+    <div class="kv"><span>模型配置入口</span><button class="btn btn-text" @click="page='llm';drawer=false">模型网关 →</button></div>
+    <div class="kv"><span>控制台地址</span><code>:9000</code></div>
+    <div class="kv"><span>默认靶站</span><code>:8888</code></div>
+    <div class="kv"><span>Canary 回连</span><code>:9000 /t/</code></div>
+    <p class="hint" style="margin-top:14px">主题与侧栏状态保存在浏览器本地；模型与指挥位在「模型网关」页维护：新增 Provider → 测试连通 → 点「设为指挥」。</p>
+  </div>
+</div>
+
+<!-- ============ 直接对话弹窗（fuckai 同款三栏） ============ -->
+<chat-modal v-if="chatUI.show" :pid="chatUI.pid" @close="chatUI.show=false"></chat-modal>
+</div>
+</body>
+
+<script>
+const {createApp,ref,reactive,computed,onMounted,watch} = Vue;
+
+/* ============ 全局单例状态（切页永不销毁） ============ */
+const live = reactive({events:[], connected:false, last:"等待事件…"});
+let es = null;
+function startSSE(){
+  if(es) return;
+  es = new EventSource("/sse/stream");
+  es.onopen  = ()=> live.connected = true;
+  es.onerror = ()=> live.connected = false;
+  es.onmessage = e=>{
+    try{
+      const d = JSON.parse(e.data);
+      live.events.unshift(d);
+      if(live.events.length>500) live.events.pop();
+      live.last = `[${d.type}] ${d.summary}`;
+      if(window.__sseTap) try{ window.__sseTap(d) }catch(_){}
+      // 多订阅：不同页面各自注册（Live 页消费会话事件，Graph 页消费变形流）
+      const taps=window.__sseTaps||[];
+      for(const f of taps){ try{ f(d) }catch(_){} }
+    }catch(_){}
+  };
+}
+async function api(url,opt){ const r=await fetch(url,opt); try{return await r.json()}catch(_){return {}} }
+function esc(s){return String(s??"").replace(/[<>&"]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;",'"':"&quot;"}[c]))}
+// 反解 HTML 实体：源码预览用。LLM 生成的页面偶发把 JSON 写成 {&quot;...}，
+// 文本插值不会解码实体，会把 &quot; 原样显示；这里统一还原成真实字符再展示。
+function decodeEnt(s){
+  return String(s??"")
+    .replace(/&amp;quot;|&amp;#34;/g,'"')
+    .replace(/&quot;|&#34;/g,'"')
+    .replace(/&#39;|&apos;/g,"'")
+    .replace(/&lt;/g,"<").replace(/&gt;/g,">")
+    .replace(/&amp;/g,"&");
+}
+function fmtLen(n){return n>1024?(n/1024).toFixed(1)+"KB":n+"B"}
+/* 英文枚举值 → 中文徽章文案（阶段/状态/策略/工具/事件类型/生成来源） */
+const ZH = {
+  // 攻击阶段
+  RECON:"侦察", PROBING:"探测中", ENGAGED:"交战中", CRED_SUBMITTED:"已提交凭据",
+  EXPLOITED:"利用中", DONE:"已结束", IDLE:"空闲",
+  // 任务/靶站状态
+  DEPLOYED:"已部署", BUILDING:"构建中", ANALYZING:"分析中", DOWNLOADING:"下载中",
+  CLEANING:"清理中", PENDING:"等待中", FAILED:"失败", RUNNING:"运行中",
+  STOPPED:"已停止", PAUSED:"已暂停", DEPLOYING:"部署中",
+  // 陷阱策略
+  static:"静态模板", custom:"自定义正文", fake_login:"假登录", credential_capture:"凭据捕获",
+  mfa_verify:"MFA 验证", sqli_echo:"注入回显", canary_download:"Canary 下载",
+  // 工具特征
+  browser:"浏览器", path_scanner:"路径扫描器", scanner:"扫描器", crawler:"爬虫",
+  curl:"curl", wget:"wget", python:"Python 脚本", sqlmap:"SQLMap", nmap:"Nmap",
+  nikto:"Nikto", gobuster:"Gobuster", unknown:"未知", noise:"噪声",
+  probe:"探测访问", human:"人工访问",
+  // 事件类型
+  "trap.triggered":"陷阱命中", "trap.credential":"凭据捕获", "trap.created":"陷阱新增",
+  "trap.deleted":"陷阱删除", "trap.mount":"挂载变更", "trap.evolved":"LLM 编排陷阱",
+  "request.miss":"未命中请求", "request.noise":"扫描噪声",
+  "growth.node.created":"站点自生长", "growth.denied":"生长受限",
+  "instance.started":"靶站启动", "instance.stopped":"靶站停止", "instance.deployed":"实例部署",
+  "instance.crash":"实例崩溃", "instance.orphan_killed":"清理孤儿进程",
+  "instance.file.write":"文件写入", "instance.file.delete":"文件删除",
+  // 生成来源
+  template:"内置模板", "llm-morph":"LLM 变形", "llm-clone":"LLM 克隆",
+};
+function zh(v){
+  const s=String(v??"");
+  if(!s) return "-";
+  if(ZH[s]) return ZH[s];
+  if(s.startsWith("session:")) return "会话生长";
+  if(s.startsWith("llm:")) return "LLM（"+s.slice(4)+"）";
+  if(s.startsWith("site.")||s.startsWith("clone.")||s.startsWith("morph.")) return "任务事件";
+  return s;
+}
+
+/* ============ 图标 ============ */
+const I = {
+  dash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="3.5" width="7.4" height="7.4" rx="1.6"/><rect x="13.1" y="3.5" width="7.4" height="7.4" rx="1.6"/><rect x="3.5" y="13.1" width="7.4" height="7.4" rx="1.6"/><rect x="13.1" y="13.1" width="7.4" height="7.4" rx="1.6"/></svg>',
+  live:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="2.2"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 16.2a6 6 0 0 0 0-8.4M5 5a10 10 0 0 0 0 14M19 19a10 10 0 0 0 0-14"/></svg>',
+  sites:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 9h17M9 9v11"/></svg>',
+  clones:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="8" y="8" width="12.5" height="12.5" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></svg>',
+  profiles:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20c1.4-3.4 4.2-5 7.5-5s6.1 1.6 7.5 5"/></svg>',
+  traps:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M12 3.5 21 19H3L12 3.5Z"/><path d="M12 10v4.2M12 16.8v.4"/></svg>',
+  rlog:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M7 9l2.2 2.2L7 13.4M12 14h5"/></svg>',
+  graph:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="2.4"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M6.6 6.6 10.2 10.2M17.4 6.6 13.8 10.2M6.6 17.4 10.2 13.8M17.4 17.4 13.8 13.8"/></svg>',
+  reports:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M6 3.5h9L19 8v12.5H6z"/><path d="M14.5 3.5V8H19M9 12h6M9 15.5h6"/></svg>',
+  llm:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 3l2.2 4.6L19 9l-4.8 1.4L12 15l-2.2-4.6L5 9l4.8-1.4L12 3Z"/><path d="M18.5 15l1 2.1 2.1 1-2.1 1-1 2.1-1-2.1-2.1-1 2.1-1 1-2.1Z"/></svg>',
+};
+
+/* ============ 页面组件 ============ */
+const Dashboard = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>总览</h1><div class="desc">蜜罐运行态势 · 数据每秒合批落库，磁贴点击可跳转对应页面</div></div>
+    <div class="actions"><button class="btn" @click="refresh" :class="{spin:loading}">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      {{loading?"刷新中…":"刷新"}}</button></div>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat" v-for="s in cards" :key="s.t" @click="page && (goPage(s.page))">
+      <div class="stat-ico" :class="s.color" v-html="s.icon"></div>
+      <div class="stat-value">{{s.n}}</div>
+      <div class="stat-label">{{s.t}}</div>
+      <div class="stat-sub">{{s.sub}}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-ico c-red" v-html="icons.alert"></div>
+      <div class="stat-value">{{risky}}</div>
+      <div class="stat-label">高危会话</div>
+      <div class="stat-sub">{{risky>0?"需要重点关注":"暂无高危会话"}}</div>
+    </div>
+  </div>
+
+  <div class="dash-row">
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">{{winText}}流量趋势</h2>
+        <span class="card-note">请求 / 陷阱命中 / 自生长（按时间桶聚合）</span></div>
+      <div class="card-body"><area-chart :labels="tlLabels" :series="tlSeries" :height="230"></area-chart></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">事件类型分布</h2>
+        <span class="card-note">{{winText}}</span></div>
+      <div class="card-body"><donut-chart :data="eventDist" :size="140" :thick="20" unit="事件总数"></donut-chart></div>
+    </div>
+  </div>
+
+  <div class="dash-row three">
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">陷阱命中 TOP</h2>
+        <span class="card-note">累计命中次数</span></div>
+      <div class="card-body"><bar-chart :data="trapRank" unit="次"></bar-chart></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">会话评分分布</h2>
+        <span class="card-note">攻击者威胁分档</span></div>
+      <div class="card-body"><bar-chart :data="scoreDist" unit="个" color="#b37feb"></bar-chart></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">分库存储占比</h2>
+        <span class="card-note">SQLite 分库体积</span></div>
+      <div class="card-body"><donut-chart :data="storageDist" :size="140" :thick="20" unit="MB"></donut-chart></div>
+    </div>
+  </div>
+
+  <div class="dash-row">
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">高频攻击路径 TOP</h2>
+        <span class="card-note">{{winText}}请求数</span></div>
+      <div class="card-body"><bar-chart :data="topPaths" unit="次"></bar-chart></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">实时动态 · 时间线</h2>
+        <span class="card-note">全局缓冲随切页保留</span></div>
+      <div class="card-body" style="max-height:430px;overflow-y:auto">
+        <div class="tl">
+          <div class="it" v-for="e in recent" :key="e.id" :class="{hot:e.type.includes('credential')||e.type.includes('trap.')}">
+            <span class="tag tag-blue">{{zh(e.type)}}</span> <span class="hint">{{e.ts}}</span><br>{{e.summary}}</div>
+          <div v-if="!recent.length" class="empty">暂无事件</div></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">存储分库</h2>
+      <span class="card-note">完整报文 zlib 压缩 · 保留期自动清理 · 写合批落库</span></div>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>库</th><th>文件</th><th>体积</th><th>表行数</th></tr></thead><tbody>
+      <tr v-for="r in storageRows" :key="r.k">
+        <td><span class="tag tag-blue">{{r.name}}</span></td>
+        <td><code>{{r.file}}</code></td>
+        <td>{{r.mb}} MB</td>
+        <td><code>{{r.tables}}</code></td></tr>
+      <tr v-if="!storageRows.length"><td colspan="4" class="empty">暂无数据</td></tr></tbody></table></div>
+  </div>
+</div>`,
+  data(){return{ov:{},live,storage:{},charts:{},loading:false,
+    icons:{alert:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M12 3.5 21 19H3L12 3.5Z"/><path d="M12 10v4.2M12 16.8v.4"/></svg>',
+      sess:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20c1.4-3.4 4.2-5 7.5-5s6.1 1.6 7.5 5" stroke-linecap="round"/></svg>',
+      hp:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2.5 4 6.2v6.3c0 4.6 3.3 8.4 8 9 4.7-.6 8-4.4 8-9V6.2L12 2.5Z"/></svg>',
+      node:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="2.4"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M6.6 6.6 10.2 10.2M17.4 17.4 13.8 13.8"/></svg>',
+      trap:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M12 3.5 21 19H3L12 3.5Z"/><path d="M12 10v4.2M12 16.8v.4"/></svg>',
+      token:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><path d="M6 3.5h9L19 8v12.5H6z"/><path d="M14.5 3.5V8H19"/></svg>',
+      grow:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8M21 7v6h-6"/></svg>'}}},
+  computed:{
+    risky(){return this.ov.risky||0},
+    storageRows(){const names={site:"站点信息",log:"运行日志",session:"会话画像",config:"配置",asset:"资产"};
+      return Object.entries(this.storage||{}).map(([k,v])=>({k:k,name:names[k]||k,file:v.file,
+        mb:v.size_mb,tables:Object.entries(v.tables||{}).map(([t,n])=>t+" "+n).join(" · ")}))},
+    tlLabels(){return (this.charts.timeline||[]).map(t=>t.label||t.bucket||"")},
+    winText(){return { "24h":"近 24 小时","7d":"近 7 天","30d":"近 30 天" }[this.charts.window]||"近期"},
+    tlSeries(){const tl=this.charts.timeline||[];return [
+      {name:"HTTP 请求",color:"#fa8c16",values:tl.map(t=>t.req||0)},
+      {name:"陷阱命中",color:"#b37feb",values:tl.map(t=>t.trap||0)},
+      {name:"自生长",  color:"#52c41a",values:tl.map(t=>t.growth||0)}]},
+    eventDist(){return this.charts.event_dist||[]},
+    trapRank(){return (this.charts.trap_rank||[]).map(t=>({name:t.name,value:t.hits||0}))},
+    scoreDist(){return this.charts.score_dist||[]},
+    storageDist(){return (this.charts.storage||[]).map(s=>({name:s.name,value:s.value||0}))},
+    topPaths(){return (this.charts.top_paths||[]).map(p=>({name:p.name,value:p.value||0}))},
+    cards(){const o=this.ov;return [
+      {n:o.sessions??0,t:"攻击会话",sub:"按 UA+IP 聚合",color:"c-blue",icon:this.icons.sess,page:"profiles"},
+      {n:o.honeypots??0,t:"蜜罐",sub:"指挥模型值守",color:"c-purple",icon:this.icons.hp,page:"clones"},
+      {n:o.nodes??0,t:"SiteGraph 节点",sub:"页面+资源缓存",color:"c-cyan",icon:this.icons.node,page:"graph"},
+      {n:o.traps??0,t:"已部署陷阱",sub:"声明式 YAML",color:"c-orange",icon:this.icons.trap,page:"traps"},
+      {n:o.tokens??0,t:"Canary Token",sub:"溯源回连",color:"c-green",icon:this.icons.token,page:"traps"},
+      {n:o.growth_24h??0,t:"24h 生长",sub:"诱饵自动生成",color:"c-gray",icon:this.icons.grow,page:"graph"}]},
+    recent(){return live.events.slice(0,20)}},
+  methods:{esc,goPage(p){if(p)window.__setPage&&window.__setPage(p)},
+    async refresh(){this.loading=true;
+      const [o,s,c]=await Promise.all([api("/api/overview"),api("/api/storage"),api("/api/charts")]);
+      this.ov=o; this.storage=s; this.charts=c||{}; this.loading=false}},
+  async mounted(){this.refresh()},
+  activated(){this.refresh()},
+  created(){window.__dashboard=this}
+};
+
+const Live = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>会话直播</h1><div class="desc">SSE 实时事件流；克隆模板任务对话框（左）与靶站自生长对话框（右）在此自动生成</div></div>
+    <div class="actions"><button class="btn" @click="live.events=[]">清空缓冲</button></div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px;align-items:start">
+  <!-- 克隆模板任务对话框（左）：LLM 回复/状态实时上屏，可指挥与暂停 -->
+  <div class="card" v-if="cloneKeys.length">
+    <div class="card-head"><h2 class="card-title">克隆模板任务 · LLM 对话框</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <span v-for="cid in cloneKeys" :key="cid" class="tag" :class="cid===curCloneCid?'tag-blue':'tag-gray'"
+              style="cursor:pointer" @click="curCloneCid=cid">{{chats[cid].title||cid}}<template v-if="chats[cid].running"> ●</template></span></div></div>
+    <div class="card-body" v-if="curClone">
+      <div class="row" style="margin-bottom:10px;align-items:center">
+        <span :class="curClone.running?'tag tag-orange':'tag tag-gray'">{{curClone.running?"任务运行中 · LLM 工作直播":"任务已结束"}}</span>
+        <span class="sp"></span>
+        <button class="btn btn-sm danger" :disabled="!curClone.running" @click="pauseCur('clone')">
+          {{curClone.paused?"已暂停":"暂停任务"}}</button></div>
+      <div class="cc-log" ref="cclogClone">
+        <div v-for="(m,i) in curClone.msgs" :key="i" class="cc-msg" :class="'cc-'+m.role">
+          <div class="cc-bubble"><span class="cc-caret" v-if="m.role==='assistant' && m.open!==false">▍</span>{{decodeEnt(m.text)}}</div></div>
+        <div v-if="!curClone.msgs.length" class="empty">等待任务产出…</div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input class="input" v-model="chatInputClone" style="flex:1"
+               placeholder="给 LLM 下指令：立即回应并注入下一阶段（如：登录接口做假 token）"
+               @keyup.enter="sendCmd('clone')">
+        <button class="btn btn-primary" @click="sendCmd('clone')">发送</button></div>
+    </div></div>
+
+  <!-- 靶站管理对话框（右）：独立于左侧克隆模板任务，列出全部真实靶站并可指挥其自生长 -->
+  <div class="card" v-if="siteKeys.length">
+    <div class="card-head"><h2 class="card-title">靶站管理 · LLM 对话框（自生长）</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <span v-for="cid in siteKeys" :key="cid" class="tag" :class="cid===curSiteCid?'tag-green':'tag-gray'"
+              style="cursor:pointer" @click="curSiteCid=cid" :title="chats[cid].sid">{{chats[cid].title||cid}}</span></div></div>
+    <div class="card-body" v-if="curSite">
+      <div class="row" style="margin-bottom:10px;align-items:center">
+        <span class="tag" :class="curSite.status==='running'?'tag-green':(curSite.status==='engine'?'tag-blue':'tag-orange')">
+          {{curSite.sid}} · :{{curSite.port}} ·
+          {{curSite.status==="running"?"运行中":(curSite.status==="engine"?"拟真引擎":"已停止")}}</span>
+        <span class="tag tag-green">自生长助手 · 依据攻击态势生长站点，可增删改查文件并自动重启</span>
+        <span class="sp"></span>
+        <button class="btn btn-sm" @click="pauseCur('site')">重启站点</button></div>
+      <div class="cc-log" ref="cclogSite">
+        <div v-for="(m,i) in curSite.msgs" :key="i" class="cc-msg" :class="'cc-'+m.role">
+          <div class="cc-bubble"><span class="cc-caret" v-if="m.role==='assistant' && m.open!==false">▍</span>{{decodeEnt(m.text)}}</div></div>
+        <div v-if="!curSite.msgs.length" class="empty">等待助手产出…</div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input class="input" v-model="chatInputSite" style="flex:1"
+               placeholder="指挥靶站生长：如「给攻击者生成假后台」「加一个会员中心诱饵页」"
+               @keyup.enter="sendCmd('site')">
+        <button class="btn btn-primary" @click="sendCmd('site')">发送</button></div>
+    </div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div class="row" style="margin-bottom:12px">
+        <input class="input" v-model="filter" style="flex:1;max-width:380px" placeholder="按类型/关键字过滤，如 trap / growth / clone">
+        <span class="sp"></span>
+        <span class="hint">{{filtered.length}} 条匹配</span></div>
+      <div class="feed">
+        <div class="it" v-for="e in filtered" :key="e.id" :class="{hot:e.type.includes('credential')}">
+          <span class="tag tag-blue">{{zh(e.type)}}</span>
+          <span class="meta">{{e.ts}} · 蜜罐 {{e.clone_id}} · 会话 {{e.session_id}}</span><br>
+          {{e.summary}}
+          <div v-if="e.detail" style="margin-top:4px"><code>{{typeof e.detail==='string'?e.detail:JSON.stringify(e.detail)}}</code></div>
+        </div>
+        <div v-if="!filtered.length" class="empty">暂无匹配事件</div>
+      </div></div>
+  </div></div>`,
+  data(){return{live,filter:"",chats:Vue.reactive({}),
+    curCloneCid:"",curSiteCid:"",chatInputClone:"",chatInputSite:""}},
+  computed:{
+    cloneKeys(){return Object.keys(this.chats).filter(k=>this.chats[k].kind!=="site")},
+    siteKeys(){return Object.keys(this.chats).filter(k=>this.chats[k].kind==="site")},
+    curClone(){return this.chats[this.curCloneCid]||null},
+    curSite(){return this.chats[this.curSiteCid]||null},
+    filtered(){
+    const f=this.filter.toLowerCase();
+    return live.events.filter(e=>!f || (e.type+e.summary).toLowerCase().includes(f))}},
+  methods:{
+    ensure(key, opts){
+      const o=opts||{};
+      if(!this.chats[key]) this.chats[key]={msgs:[],running:true,paused:false,
+        kind:o.kind||"clone", sid:o.sid||key, title:o.title||key};
+      if(this.chats[key].kind==="site"){ if(!this.curSiteCid) this.curSiteCid=key; }
+      else if(!this.curCloneCid) this.curCloneCid=key;
+      return this.chats[key] },
+    onSSE(d){
+      const t=d.type||"";
+      const isSite=t.startsWith("site.")||t.startsWith("instance.");
+      const isClone=t.startsWith("clone.");
+      if(!isSite&&!isClone) return;
+      const key=isSite?("site:"+d.clone_id):d.clone_id;
+      const ct=this.ensure(key, isSite?{kind:"site",sid:d.clone_id}:undefined);
+      if(t.endsWith(".user")){ this.closeOpen(ct); ct.msgs.push({role:"user",text:d.summary}); }
+      else if(t.endsWith(".llm")){
+        const last=ct.msgs[ct.msgs.length-1];
+        if(last&&last.role==="assistant"&&last.open!==false){ last.text+=d.summary; }
+        else ct.msgs.push({role:"assistant",text:d.summary,open:true});
+        this.scrollChat(ct.kind);
+      }
+      else if(t.endsWith(".reply")){ this.closeOpen(ct); ct.msgs.push({role:"assistant",text:d.summary}); }
+      else{
+        this.closeOpen(ct);
+        ct.msgs.push({role:"system",text:`${d.ts||""} ${t}: ${d.summary}`});
+        if(t==="clone.paused"){ ct.running=false; ct.paused=true; }
+        else if(/clone.DEPLOYED|clone.FAILED/.test(t)) ct.running=false;
+        if(t==="instance.evolved") ct.msgs.push({role:"assistant",text:"",open:false});
+      }
+      this.scrollChat(ct.kind);
+    },
+    closeOpen(ct){ const last=ct.msgs[ct.msgs.length-1];
+      if(last&&last.role==="assistant") last.open=false; },
+    scrollChat(kind){ this.$nextTick(()=>{
+      const el=this.$refs[kind==="site"?"cclogSite":"cclogClone"];
+      if(el) el.scrollTop=el.scrollHeight; }); },
+    async sendCmd(kind){
+      const ct=kind==="site"?this.curSite:this.curClone;
+      const input=kind==="site"?"chatInputSite":"chatInputClone";
+      const t=(this[input]||"").trim(); if(!t||!ct) return;
+      this[input]="";
+      const url=ct.kind==="site" ? `/api/instances/${ct.sid}/command`
+                                 : `/api/clones/${ct.sid}/command`;
+      const r=await api(url,{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t})});
+      if(r.error){window.__toast(r.error,"err");return}
+      window.__toast(ct.kind==="site"?"自生长助手正在处理，回复实时直播":
+        (r.running?"LLM 正在回应，指令将注入下一阶段":"LLM 已回应"),"ok");
+    },
+    async pauseCur(kind){
+      const ct=kind==="site"?this.curSite:this.curClone; if(!ct) return;
+      if(ct.kind==="site"){
+        const r=await api(`/api/instances/${ct.sid}/restart`,{method:"POST"});
+        if(r.error){window.__toast(r.error,"err");return}
+        window.__toast(`站点已重启 pid=${r.pid||"-"}`,"ok"); return;
+      }
+      const r=await api(`/api/clones/${ct.sid}/pause`,{method:"POST"});
+      if(r.error){window.__toast(r.error,"err");return}
+      ct.paused=true;
+      window.__toast("任务已暂停：后台协程已终止","ok");
+    },
+    async seedHistory(){
+      // 回填历史克隆任务的落库事件（LLM 流不落库，刷新后仅用户/阶段消息可见）
+      const cl=await api("/api/clones"); const evs=await api("/api/events?limit=300");
+      cl.slice(0,6).forEach(c=>{
+        const ct=this.ensure(c.id);
+        evs.filter(e=>e.clone_id===c.id).reverse().forEach(e=>{
+          if(e.type==="clone.user") ct.msgs.push({role:"user",text:e.summary});
+          else ct.msgs.push({role:"system",text:`${e.ts||""} ${e.type}: ${e.summary}`});
+        });
+        if(/DEPLOYED|FAILED/.test(c.status)) ct.running=false;
+      });
+    },
+    // 靶站管理行：常驻列出全部真实靶站（不依赖 SSE 事件到达才出现）
+    async seedSites(){
+      const sites=await api("/api/sites");
+      const insts=await api("/api/instances");
+      const st={}; (insts||[]).forEach(i=>st[i.site_id]=i);
+      (sites||[]).forEach(s=>{
+        const key="site:"+s.id;
+        const inst=st[s.id];
+        const ct=this.ensure(key,{kind:"site",sid:s.id,
+          title:`${s.name||s.id.slice(0,8)} · ${s.id.slice(0,8)} · :${s.port}`});
+        ct.sid=s.id; ct.title=`${s.name||s.id.slice(0,8)} · ${s.id.slice(0,8)} · :${s.port}`;
+        ct.port=s.port; ct.clonestatus=s.clone_status||"";
+        ct.enabled=!!s.enabled;
+        // 实例模式（独立进程）vs 拟真引擎模式（内置 SiteGraph 监听）
+        ct.mode=inst?"instance":"engine";
+        ct.status=inst?inst.status:"engine";
+      });
+      if(!this.curSiteCid){
+        const first=this.siteKeys[0]; if(first) this.curSiteCid=first;
+      }
+    }
+  },
+  mounted(){ window.__sseTap=d=>this.onSSE(d); this.seedHistory(); this.seedSites(); },
+  activated(){
+    const cid=window.__liveFocusCid;
+    if(cid){
+      const isSite=cid.startsWith("site:");
+      this.ensure(cid, isSite?{kind:"site",sid:cid.slice(5),
+        title:window.__liveFocusTitle||cid.slice(5,13)}:undefined);
+      if(isSite) this.curSiteCid=cid; else this.curCloneCid=cid;
+      window.__liveFocusCid=null; window.__liveFocusTitle=null;
+    }
+    window.__sseTap=d=>this.onSSE(d);
+    this.seedSites();
+  },
+  unmounted(){ window.__sseTap=null; }
+};
+
+const LiveLogs = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>实时日志</h1>
+      <div class="desc">各靶站浏览器访问实时汇总 · 攻击者 IP 优先显示 WebRTC 溯源真实出口 · 会话/工具特征/凭据一并标注</div></div>
+    <div class="actions">
+      <button class="btn" @click="paused=!paused">{{paused?"继续刷新":"暂停"}}</button>
+      <button class="btn" @click="clearAll">清空</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div class="row" style="margin-bottom:10px;align-items:center">
+        <select class="input" v-model="siteSel" style="width:240px">
+          <option value="">全部靶站</option>
+          <option v-for="s in siteOpts" :key="s" :value="s">{{s}}</option></select>
+        <label class="hint" style="display:flex;gap:6px;align-items:center;cursor:pointer">
+          <input type="checkbox" v-model="autoScroll"> 自动滚到底部</label>
+        <span class="sp"></span>
+        <span class="hint">已缓存 {{lines.length}} 行 · 每 1.5s 增量拉取</span>
+      </div>
+      <textarea class="input mono" readonly :value="text" spellcheck="false"
+        style="width:100%;height:64vh;min-height:360px;resize:vertical;font-size:12px;line-height:1.65;white-space:pre"></textarea>
+    </div>
+  </div>
+</div>`,
+  data(){return{lines:[],cursor:0,timer:null,paused:false,siteSel:"",autoScroll:true,text:""}},
+  computed:{
+    siteOpts(){return [...new Set(this.lines.map(l=>l.site).filter(Boolean))].sort()},
+    filtered(){return this.siteSel?this.lines.filter(l=>l.site===this.siteSel):this.lines}
+  },
+  watch:{siteSel(){this.rebuild()}},
+  methods:{
+    fmt(l){
+      const t=(l.ts||"").slice(11,19)||new Date().toLocaleTimeString("zh-CN",{hour12:false});
+      // IP 优先展示 WebRTC 溯源的真实出口，并标注来源
+      let ip=l.ip||"-";
+      if(l.ip_src==="webrtc") ip+="(WebRTC真实IP)";
+      else if(l.ip_src==="http") ip+="(HTTP)";
+      const extra=[];
+      if(l.internal_ip) extra.push("内网 "+l.internal_ip);
+      if(l.tool) extra.push(zh(l.tool));
+      if(l.sid) extra.push("会话 "+l.sid);
+      const st=l.status?(" "+l.status):"";
+      if(l.text) extra.push(l.text);
+      return `[${t}] ${ip} → ${l.site||"-"}  ${l.method||""} ${l.path||""}${st}`
+        + (extra.length?"  |  "+extra.join(" · "):"");
+    },
+    rebuild(){
+      this.text=this.filtered.map(this.fmt).join("\n");
+      if(!this.autoScroll) return;
+      this.$nextTick(()=>{const t=this.$el.querySelector("textarea"); if(t) t.scrollTop=t.scrollHeight;});
+    },
+    async pull(){
+      if(this.paused) return;
+      const r=await api("/api/live/logs?after="+this.cursor+"&limit=200");
+      if(r && Array.isArray(r.lines) && r.lines.length){
+        this.lines=this.lines.concat(r.lines).slice(-2000);
+      }
+      if(r && r.cursor) this.cursor=r.cursor;
+      this.rebuild();
+    },
+    clearAll(){this.lines=[];this.text="";},
+    start(){ if(this.timer) return; this.pull(); this.timer=setInterval(()=>this.pull(),1500); },
+    stop(){ if(this.timer){clearInterval(this.timer);this.timer=null;} }
+  },
+  mounted(){this.start()},
+  activated(){this.start()},
+  deactivated(){this.stop()},
+  unmounted(){this.stop()}
+};
+
+const Sites = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>靶站管理</h1><div class="desc">预览 / 编辑挂载 / 导出 / 删除 · 端口即入口，挂载 2 秒内自动生效</div></div>
+    <div class="actions"><button class="btn btn-primary" @click="openAdd">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>新增靶站</button></div>
+  </div>
+  <div class="card">
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>名称</th><th>域名</th><th>端口</th><th>挂载蜜罐</th><th>蜜罐状态</th><th>启用</th><th class="ops">操作</th></tr></thead><tbody>
+    <tr v-for="s in list" :key="s.id">
+      <td><b>{{s.name}}</b></td><td>{{s.domain||"-"}}</td>
+      <td><span class="tag tag-blue">{{s.port}}</span></td>
+      <td>{{s.clone_id||"（未挂载）"}}</td>
+      <td><span :class="s.clone_status==='DEPLOYED'?'tag tag-green':'tag tag-orange'">{{s.clone_status}}</span></td>
+      <td><span :class="s.enabled?'tag tag-green':'tag tag-gray'">{{s.enabled?"是":"否"}}</span></td>
+      <td class="ops">
+        <button class="btn-text" @click="preview(s.port)">预览</button>
+        <button class="btn-text" @click="openInst(s)">实例</button>
+        <button class="btn-text" @click="openAI(s)">AI 助手</button>
+        <button class="btn-text" @click="openEdit(s)">编辑</button>
+        <button class="btn-text" @click="openExport(s)">导出日志</button>
+        <button class="btn-text danger" @click="del(s)">删除</button></td></tr>
+    <tr v-if="!list.length"><td colspan="7" class="empty">暂无靶站，点击右上角「新增靶站」创建</td></tr></tbody></table></div>
+  </div>
+
+  <!-- 新增/编辑抽屉 -->
+  <template v-if="form">
+  <div class="drawer-mask" @click="form=null"></div>
+  <div class="drawer open">
+    <div class="drawer-head"><h3>{{form.id?"编辑靶站":"新增靶站"}}</h3>
+      <button class="btn btn-text" @click="form=null">取消</button></div>
+    <div class="drawer-body">
+      <div class="field"><label>名称<b>*</b></label><input class="input" v-model="form.name" placeholder="如 门户仿真站"></div>
+      <div class="field"><label>域名（可空）</label><input class="input" v-model="form.domain" placeholder="target.example.com"></div>
+      <div class="field"><label>端口<b>*</b></label><input class="input" v-model.number="form.port" type="number" placeholder="1234"></div>
+      <div class="field"><label>挂载蜜罐</label>
+        <select class="input" v-model="form.clone_id">
+          <option value="">— 选择蜜罐 —</option>
+          <option v-for="c in clones" :key="c.id" :value="c.id">{{c.id}} · {{c.persona}}（{{zh(c.status)}}）</option>
+        </select></div>
+      <div class="field"><label class="check"><input type="checkbox" v-model="form.enabled"> 启用监听</label></div>
+      <p class="hint">run.py 会按 sites 表自动拉起/回收对应端口监听；「预览」在本机新标签页打开该端口站点。</p>
+    </div>
+    <div class="drawer-foot">
+      <button class="btn" @click="form=null">取消</button>
+      <button class="btn btn-primary" :disabled="saving" @click="save">{{saving?"保存中…":"保存"}}</button></div>
+  </div>
+  </template>
+
+  <!-- 导出抽屉 -->
+  <template v-if="exp">
+  <div class="drawer-mask" @click="exp=null"></div>
+  <div class="drawer open">
+    <div class="drawer-head"><h3>导出日志 · {{exp.name}}</h3>
+      <button class="btn btn-text" @click="exp=null">取消</button></div>
+    <div class="drawer-body">
+      <div class="field"><label>起始时间</label><input type="datetime-local" class="input" v-model="exp.start" step="1"></div>
+      <div class="field"><label>截止时间</label><input type="datetime-local" class="input" v-model="exp.end" step="1"></div>
+      <div class="field"><label>导出格式</label>
+        <select class="input" v-model="exp.fmt">
+          <option value="json">JSON（结构化+原始报文，BurpSuite 可复现）</option>
+          <option value="csv">CSV（表格/Excel）</option>
+        </select></div>
+      <p class="hint">完整收发数据包 · 流式导出无条数上限 · 仅支持 JSON / CSV 格式。</p>
+    </div>
+    <div class="drawer-foot">
+      <button class="btn" @click="exp=null">取消</button>
+      <button class="btn btn-primary" @click="doExport">下载导出</button></div>
+  </div>
+  </template>
+
+  <!-- 靶站实例弹窗：文件树 / 编辑 / LLM 态势进化 -->
+  <template v-if="inst">
+  <div class="chat-mask" @click="inst=null"></div>
+  <div class="inst-modal">
+    <div class="chat-head">
+      <div><b>靶站实例</b> · {{inst.site_name}}（端口 {{inst.port}}）
+        <span :class="inst.status==='running'?'tag tag-green':'tag tag-orange'">{{inst.status==='running'?"运行中":"已停止"}}</span>
+        <span class="tag tag-gray">{{inst.template_id}}</span></div>
+      <button class="btn btn-text" @click="inst=null">关闭</button>
+    </div>
+    <div class="inst-body">
+      <!-- 左：文件树 -->
+      <div class="inst-side">
+        <div class="inst-side-h">文件（LLM 可增删改查）</div>
+        <div class="chat-sess-list" style="max-height:52vh">
+          <div class="chat-sess-item" v-for="f in instFiles" :key="f.path"
+               :class="{on: instPath===f.path}" @click="openFile(f.path)">
+            <span class="fp">{{f.path}}</span>
+            <span class="fs">{{f.size}}B</span></div>
+          <div v-if="!instFiles.length" class="empty">实例尚未部署（挂载后自动复制模板）</div>
+        </div>
+        <button class="btn btn-sm" style="width:100%;margin-top:8px" @click="refreshInst">刷新列表</button>
+        <button class="btn btn-sm" style="width:100%;margin-top:6px" @click="restartInst">重启实例进程</button>
+      </div>
+      <!-- 中：文件查看/编辑 -->
+      <div class="inst-main">
+        <div class="inst-toolbar">
+          <input class="input" v-model="instPath" placeholder="文件路径，如 frontend/decoy.html 或 backend/app.py" style="flex:1">
+          <button class="btn btn-primary btn-sm" @click="saveFile">保存</button>
+          <button class="btn btn-sm danger" @click="delFile">删除</button>
+          <button class="btn btn-sm" @click="newFile">新建</button>
+        </div>
+        <textarea class="input inst-editor" v-model="instContent" spellcheck="false"
+          placeholder="选择左侧文件查看内容，或输入路径后点「新建」直接编辑；保存后建议重启实例进程生效"></textarea>
+        <div class="chat-sent-hint" v-if="instMsg">{{instMsg}}</div>
+      </div>
+      <!-- 右：LLM 态势进化 -->
+      <div class="inst-side">
+        <div class="inst-side-h">LLM 态势进化</div>
+        <p class="hint" style="font-size:12px">LLM 读取实时攻击者态势（事件流/会话画像/凭据日志），
+          自动增删改查本实例文件：加诱饵路径、下线暴露路径、调整话术。</p>
+        <textarea class="input" v-model="evolveText" rows="4"
+          placeholder="进化指令（留空 = LLM 自行研判），如：增加一个会员中心页面诱饵"></textarea>
+        <button class="btn btn-primary" style="width:100%;margin-top:10px" :disabled="evolving" @click="doEvolve">
+          {{evolving?"LLM 进化中…（1-3 分钟）":"执行进化"}}</button>
+        <div v-if="evolveResult" class="inst-evolve">
+          <div class="rt">应用 {{evolveResult.applied.length}} 项 · 跳过 {{evolveResult.skipped.length}} 项</div>
+          <div class="rb" v-for="a in evolveResult.applied" :key="a.path">
+            [{{a.op}}] {{a.path}}<span v-if="a.bytes"> · {{a.bytes}}B</span></div>
+          <div class="rb skip" v-for="a in evolveResult.skipped" :key="a.path">
+            [跳过] {{a.path}} · {{a.why}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </template>
+</div>`,
+  data(){return{list:[],clones:[],form:null,exp:null,saving:false,
+    inst:null,instFiles:[],instPath:"",instContent:"",instMsg:"",evolveText:"",evolving:false,evolveResult:null}},
+  methods:{
+    async refresh(){this.list=await api("/api/sites");this.clones=await api("/api/clones")},
+    // 跳到会话直播页的靶站 LLM 对话框（自由指挥真实运行的靶站）
+    openAI(s){ window.__liveFocusCid="site:"+s.id;
+      window.__liveFocusTitle="站点·"+s.name; window.__setPage("live"); },
+    // ---- 靶站实例：文件 CRUD + LLM 态势进化 ----
+    async openInst(s){
+      const il=await api("/api/instances");
+      const found=il.find(x=>x.site_id===s.id);
+      this.inst=found||{site_id:s.id,site_name:s.name,port:s.port,template_id:s.clone_id||"",status:"stopped"};
+      this.instMsg=""; this.evolveResult=null;
+      this.refreshInst();
+    },
+    async refreshInst(){
+      this.instFiles=await api(`/api/instances/${this.inst.site_id}/files`);
+      const il=await api("/api/instances");
+      const f=il.find(x=>x.site_id===this.inst.site_id);
+      if(f) this.inst=f;
+    },
+    async openFile(p){
+      const r=await api(`/api/instances/${this.inst.site_id}/file?path=${encodeURIComponent(p)}`);
+      if(r.error){window.__toast(r.error,"err");return}
+      this.instPath=p; this.instContent=r.content; this.instMsg="";
+    },
+    newFile(){ this.instContent=""; },
+    async saveFile(){
+      if(!this.instPath){window.__toast("请先填写文件路径","err");return}
+      const r=await api(`/api/instances/${this.inst.site_id}/file`,{method:"PUT",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({path:this.instPath,content:this.instContent})});
+      if(r.error){window.__toast(r.error,"err");return}
+      this.instMsg=`已写入 ${r.path}（${r.bytes}B）· 建议重启实例进程生效`;
+      window.__toast("文件已保存","ok"); this.refreshInst();
+    },
+    async delFile(){
+      if(!this.instPath) return;
+      if(!confirm(`确认删除 ${this.instPath}？`))return;
+      const r=await api(`/api/instances/${this.inst.site_id}/file?path=${encodeURIComponent(this.instPath)}`,{method:"DELETE"});
+      if(r.error){window.__toast(r.error,"err");return}
+      window.__toast("已删除","ok"); this.instContent=""; this.refreshInst();
+    },
+    async restartInst(){
+      const r=await api(`/api/instances/${this.inst.site_id}/restart`,{method:"POST"});
+      if(r.error){window.__toast(r.error,"err");return}
+      window.__toast(`实例已重启 pid=${r.pid||"-"}`,"ok"); this.refreshInst();
+    },
+    async doEvolve(){
+      this.evolving=true; this.evolveResult=null;
+      try{
+        const r=await api(`/api/instances/${this.inst.site_id}/evolve`,{method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({instruction:this.evolveText})});
+        if(r.error){window.__toast(r.error,"err")}
+        else{this.evolveResult=r; window.__toast("LLM 进化完成，实例已重启","ok"); this.refreshInst()}
+      }finally{this.evolving=false}
+    },
+    preview(port){window.open(`http://127.0.0.1:${port}/`,"_blank")},
+    openAdd(){this.form={name:"",domain:"",port:"",clone_id:"",enabled:true}},
+    openEdit(s){this.form={...s}},
+    openExport(s){const pad=n=>String(n).padStart(2,"0");
+      const f=t=>`${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
+      const now=new Date(), d0=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+      this.exp={id:s.id,name:s.name,start:f(d0),end:f(now),fmt:"json"}},
+    doExport(){const q=new URLSearchParams({site_id:this.exp.id,
+      start:this.exp.start,end:this.exp.end,fmt:this.exp.fmt||"json"});
+      window.open("/api/logs/export?"+q.toString()); this.exp=null},
+    async save(){this.saving=true;
+      const body=JSON.stringify(this.form);
+      const r=this.form.id
+        ? await api("/api/sites/"+this.form.id,{method:"PUT",headers:{"Content-Type":"application/json"},body})
+        : await api("/api/sites",{method:"POST",headers:{"Content-Type":"application/json"},body});
+      this.saving=false;
+      if(r.error){window.__toast(r.error,"err")} else {window.__toast(this.form.id?"靶站已更新":"靶站已创建并挂载","ok"); this.form=null; this.refresh()}},
+    async del(s){if(!confirm(`确认删除靶站「${s.name}」（端口 ${s.port}）？监听将自动回收。`))return;
+      const r=await api("/api/sites/"+s.id,{method:"DELETE"});
+      if(r.error)window.__toast(r.error,"err"); else {window.__toast("靶站已删除","ok"); this.refresh()}}
+  },
+  mounted(){this.refresh()},
+  activated(){this.refresh()}
+};
+
+const Clones = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>仿冒模板</h1><div class="desc">指挥模型 Download → Analyze → Build → Deploy · 一个模板 = 一个完整前后端，靶站挂载时自动复制独立实例运行</div></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">一键复刻</h2>
+      <span class="card-note">完成后到「靶站管理」挂载新蜜罐</span></div>
+    <div class="card-body">
+      <div class="row"><input class="input" v-model="src" style="flex:2;min-width:260px" placeholder="https://target-site.example">
+        <input class="input" v-model="persona" style="flex:1;min-width:160px" placeholder="人设（留空用默认）">
+        <button class="btn btn-primary" @click="go" :disabled="running">
+          <svg v-if="running" class="spin" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          {{running?"复刻进行中…（进度见会话直播）":"开始复刻"}}</button></div>
+      <p class="hint" style="margin-top:10px">需先在「模型网关」指定指挥模型。</p></div>
+  </div>
+
+  <div class="card">
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>源站</th><th>人设</th><th>状态</th><th>创建时间</th><th class="ops">操作</th></tr></thead><tbody>
+    <tr v-for="c in list" :key="c.id">
+      <td><span class="tag tag-blue">{{c.id}}</span></td><td>{{c.source_url}}</td><td>{{c.persona}}</td>
+      <td><span :class="String(c.status).includes('FAILED')?'tag tag-red':(c.status==='DEPLOYED'?'tag tag-green':'tag tag-orange')">{{zh(c.status)}}</span></td>
+      <td class="hint">{{c.created_at}}</td>
+      <td class="ops"><button class="btn-text" @click="openChat(c)">对话</button>
+        <button class="btn-text danger" @click="del(c)">删除</button></td></tr>
+    <tr v-if="!list.length"><td colspan="6" class="empty">暂无蜜罐</td></tr></tbody></table></div>
+  </div>
+</div>`,
+  data(){return{list:[],src:"",persona:"",running:false}},
+  methods:{
+    async refresh(){this.list=await api("/api/clones")},
+    async go(){if(!this.src){window.__toast("请输入源站地址","err");return} this.running=true;
+      const r=await api("/api/clones",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({source_url:this.src,persona:this.persona})});
+      this.running=false;
+      if(r.error)window.__toast(r.error,"err");
+      else{window.__toast("复刻任务已启动，LLM 对话框已在会话直播生成","ok"); this.src="";
+        window.__liveFocusCid=r.clone_id; window.__setPage("live")}
+      this.refresh()},
+    openChat(c){ window.__liveFocusCid=c.id; window.__setPage("live"); },
+    async del(c){if(!confirm(`确认删除蜜罐 ${c.id}？其节点/账本将一并清除，引用它的靶站会被解绑。`))return;
+      const r=await api("/api/clones/"+c.id,{method:"DELETE"});
+      if(r.error)window.__toast(r.error,"err"); else {window.__toast("蜜罐已删除","ok"); this.refresh()}}
+  },
+  mounted(){this.refresh()},
+  activated(){this.refresh()}
+};
+
+const Profiles = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>攻击者画像</h1><div class="desc">行为序列 + 工具族指纹 + 凭据记录 → 分层研判：是否 Agent / 什么 Agent</div></div>
+    <div class="actions">
+      <label class="check"><input type="checkbox" :checked="rows.length>0&&selectedIds.length===rows.length" @change="toggleAll($event)">全选</label>
+      <button class="btn danger" :disabled="!selectedIds.length" @click="deleteSelected">删除选中（{{selectedIds.length}}）</button>
+      <button class="btn" @click="exportLogs()">导出全部日志</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th></th><th>会话</th><th>IP</th><th>UA</th><th>工具特征</th><th>Agent 画像</th><th>评分</th><th>阶段</th><th>首次出现</th><th>最后活跃</th><th class="ops">操作</th></tr></thead><tbody>
+    <tr v-for="s in rows" :key="s.id">
+      <td><input type="checkbox" v-model="selectedIds" :value="s.id" :aria-label="'选择会话 '+s.id"></td>
+      <td><span class="tag tag-blue">{{s.id}}</span></td><td>{{s.ip}}</td>
+      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="s.ua">{{s.ua}}</td>
+      <td><span class="tag tag-gray">{{zh(s.tool)}}</span></td>
+      <td style="max-width:280px" :title="(s.agent_evidence||[]).join('；')">
+        <span :class="s.agent_score>=40?'tag tag-red':s.agent_score>=20?'tag tag-orange':'tag tag-gray'">{{s.agent_label||'未判定'}}</span><small v-if="s.agent_score"> {{s.agent_score}}</small>
+        <div v-if="s.agent_guess" class="hint" style="margin-top:3px"><b>推断</b>：{{s.agent_guess}}</div>
+        <div v-if="s.families" class="hint">工具族：{{s.families}}</div>
+        <div v-if="s.agent_evidence&&s.agent_evidence.length" class="hint">证据×{{s.agent_evidence.length}}：{{s.agent_evidence.slice(0,3).join('；')}}<template v-if="s.agent_evidence.length>3"> …</template></div>
+      </td>
+      <td><span :class="s.score>=25?'tag tag-red':s.score>=10?'tag tag-orange':'tag tag-green'">{{s.score}}</span></td>
+      <td>{{zh(s.state)}}</td>
+      <td class="hint" :title="s.first_seen">{{ts(s.first_seen)}}</td>
+      <td class="hint" :title="s.last_seen"><b>{{ts(s.last_seen)}}</b></td>
+      <td class="ops">
+        <button class="btn-text" :disabled="analyzing===s.id" @click="analyze(s.id)">
+          <svg v-if="analyzing===s.id" class="spin" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          {{analyzing===s.id?"研判中…":"AI 研判"}}</button>
+        <button class="btn-text" @click="viewLogs(s.id)">活动日志</button>
+          <button class="btn-text" @click="exportLogs(s.id)">导出</button>
+          <button class="btn-text danger" @click="deleteOne(s)">删除</button></td></tr>
+        <tr v-if="!rows.length"><td colspan="11" class="empty">暂无会话</td></tr></tbody></table></div>
+  </div>
+
+  <div class="card" v-if="profile">
+    <div class="card-head"><h2 class="card-title">指挥模型研判结论</h2>
+      <span class="card-note">含凭据特征分析</span></div>
+    <div class="card-body">
+      <div v-for="(v,k) in profile" :key="k" class="kv">
+        <span>{{k}}</span>
+        <span class="kv-val">
+          <template v-if="Array.isArray(v)"><div v-for="(x,i) in v" :key="i" class="hint">· {{x}}</div></template>
+          <template v-else>{{v}}</template></span></div></div>
+  </div>
+
+  <div class="two-col" v-if="logs" style="margin-top:16px">
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">活动日志</h2><span class="card-note">会话 {{logSid}}</span></div>
+      <div class="card-body feed" style="max-height:50vh">
+        <div class="it" v-for="e in logs" :key="e.id" :class="{hot:e.type==='trap.credential'}">
+          <span class="tag" :class="e.type==='trap.credential'?'tag-red':'tag-blue'">{{zh(e.type)}}</span>
+          <span class="meta">{{e.ts}}</span><br>{{e.summary}}
+          <div v-if="e.detail" style="margin-top:3px"><code>{{typeof e.detail==='string'?e.detail:JSON.stringify(e.detail)}}</code></div>
+        </div>
+        <div v-if="!logs.length" class="empty">该会话暂无日志</div></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2 class="card-title">弱口令尝试</h2><span class="card-note">完整数据包解析 · 会话 {{logSid}}</span></div>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>时间</th><th>路径</th><th>账号</th><th>密码</th></tr></thead><tbody>
+      <tr v-for="(c,i) in creds" :key="i">
+        <td class="hint">{{c.ts}}</td><td><code>{{c.path}}</code></td>
+        <td><span class="tag tag-orange">{{c.username||"-"}}</span></td>
+        <td><span class="tag tag-red">{{c.password||"-"}}</span></td></tr>
+      <tr v-if="!creds.length"><td colspan="4" class="empty">该会话未捕获到弱口令尝试</td></tr></tbody></table></div>
+    </div>
+  </div>
+</div>`,
+  data(){return{rows:[],profile:null,logs:null,creds:[],logSid:"",analyzing:null,selectedIds:[]}},
+  methods:{
+    async refresh(){this.rows=await api("/api/sessions");
+      const current=new Set(this.rows.map(s=>s.id));
+      this.selectedIds=this.selectedIds.filter(id=>current.has(id))},
+    toggleAll(event){this.selectedIds=event.target.checked?this.rows.map(s=>s.id):[]},
+    async deleteOne(s){await this.deleteSessions([s.id],`确认删除会话 ${s.id} 及其关联事件、报文和 Canary 记录？`)},
+    async deleteSelected(){await this.deleteSessions(this.selectedIds,`确认删除选中的 ${this.selectedIds.length} 个会话及其关联事件、报文和 Canary 记录？`)},
+    async deleteSessions(ids,message){if(!ids.length||!confirm(message))return;
+      const r=await api("/api/sessions",{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_ids:ids})});
+      if(r.error){window.__toast("删除失败："+r.error,"err");return}
+      if(ids.includes(this.logSid)){this.logs=null;this.creds=[];this.logSid=""}
+      this.profile=null;this.selectedIds=[];window.__toast(`已删除 ${r.deleted} 个会话及关联记录`,"ok");await this.refresh()},
+    // 时间展示：2026-11-19T12:13:38 → 11-19 12:13:38（完整值放 title）
+    ts(v){const s=String(v||"").replace("T"," "); return s.length>=19?s.slice(5,19):(s||"-")},
+    async analyze(sid){this.profile=null; this.logs=null; this.creds=[]; this.analyzing=sid;
+      this.profile={研判中:"指挥模型分析日志与凭据记录…"};
+      const r=await api("/api/profile/"+sid+"/analyze",{method:"POST"});
+      this.analyzing=null;
+      this.profile=r.error?{失败:r.error}:r.profile},
+    async viewLogs(sid){this.profile=null;this.logSid=sid;
+      this.logs=await api("/api/logs?session_id="+sid);
+      this.creds=await api("/api/packets/credentials?session_id="+sid)},
+    exportLogs(sid){window.open("/api/logs/export"+(sid?"?session_id="+sid:""))}
+  },
+  mounted(){this.refresh()},
+  activated(){this.refresh()}
+};
+
+const Traps = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>陷阱列表</h1><div class="desc">顺序即匹配优先级 · 贴近真实攻防高价值面 · LLM 可依据实时攻击态势自主增删</div></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-primary" @click="autoEvolve" :disabled="autoing">{{autoing?"LLM 编排中…":"LLM 自动增删陷阱"}}</button>
+      <button class="btn" @click="showAdd=!showAdd">{{showAdd?"收起新增表单":"新增陷阱"}}</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">LLM 自动编排</h2>
+      <span class="card-note">读取现有陷阱、未命中探测路径与会话画像，由模型自行决定新增 / 停用 / 删除，结果即时生效</span></div>
+    <div class="card-body">
+      <textarea class="input" rows="8" v-model="autoInstruct"
+        style="width:100%;box-sizing:border-box;min-height:150px;line-height:1.6"
+        placeholder="编排要求（留空 = 由模型自行研判）。例：补齐 CI/CD 与配置中心泄漏面，停用长期零命中的低价值陷阱"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary" @click="autoEvolve" :disabled="autoing">{{autoing?"编排中…":"立即编排"}}</button>
+        <button class="btn" @click="autoInstruct=''">清空要求</button>
+        <span class="hint">编排调用大模型，通常需 20~90 秒</span></div>
+      <div v-if="autoLog.length" style="margin-top:12px">
+        <div v-for="(l,i) in autoLog" :key="i" class="hint mono" :style="l.ok?'':'color:var(--warning)'">{{l.text}}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" v-if="showAdd">
+    <div class="card-head"><h2 class="card-title">新增陷阱（手工）</h2>
+      <span class="card-note">ID 限小写字母/数字/下划线；命中条件至少填写一项；正文支持 <span v-pre>{{CANARY_URL}}</span> 回连埋点占位</span></div>
+    <div class="card-body">
+      <div class="row">
+        <input class="input" v-model="nf.id" style="width:200px" placeholder="ID，如 t_k8s_secret">
+        <input class="input" v-model="nf.name" style="flex:1;min-width:200px" placeholder="名称，如 K8s Secret 泄漏">
+        <select class="input" v-model="nf.method" style="width:110px"><option>GET</option><option>POST</option></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input class="input" v-model="nf.pathGlob" style="flex:1;min-width:200px" placeholder="路径 glob（逗号分隔），如 /k8s/*,/secret/*">
+        <input class="input" v-model="nf.payloadAny" style="flex:1;min-width:200px" placeholder="载荷特征（| 分隔，任一命中），如 169.254.169.254|metadata">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select class="input" v-model="nf.strategy" style="width:230px">
+          <option value="custom">custom · 自定义正文</option>
+          <option value="static">static · 内置模板</option>
+          <option value="fake_login">fake_login · 假登录</option>
+          <option value="credential_capture">credential_capture · 凭据捕获</option>
+          <option value="mfa_verify">mfa_verify · MFA 验证码</option>
+          <option value="sqli_echo">sqli_echo · 注入回显</option>
+          <option value="canary_download">canary_download · 备份下载</option>
+        </select>
+        <select class="input" v-model="nf.media" style="width:190px">
+          <option value="text/plain">text/plain</option>
+          <option value="text/html">text/html</option>
+          <option value="application/json">application/json</option>
+          <option value="text/yaml">text/yaml</option>
+          <option value="text/xml">text/xml</option>
+          <option value="text/csv">text/csv</option>
+        </select>
+        <select class="input" v-model="nf.file" style="flex:1;min-width:200px" v-show="nf.strategy==='static'">
+          <option value="">— 选择内置模板 —</option>
+          <option v-for="t in tpls" :key="t.key" :value="t.key">{{t.key}} · {{t.size}} 字符</option>
+        </select>
+      </div>
+      <textarea class="input" rows="5" v-model="nf.body" style="margin-top:8px" v-show="nf.strategy!=='static'"
+        placeholder="自定义正文（strategy=custom 时生效）"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary" @click="submitAdd" :disabled="adding">{{adding?"保存中…":"保存陷阱"}}</button>
+        <button class="btn" @click="resetForm">重置</button>
+        <span class="hint" v-if="addMsg" :style="addErr?'color:var(--error)':''">{{addMsg}}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>名称</th><th>命中条件</th><th>策略</th><th>挂载站点</th><th>命中次数</th><th>启用</th><th class="ops">操作</th></tr></thead><tbody>
+    <tr v-for="t in list" :key="t.id">
+      <td><span class="tag tag-blue">{{t.id}}</span></td><td>{{t.name}}</td>
+      <td class="cond">{{t.match}}</td>
+      <td><span class="tag tag-purple">{{zh(t.strategy)}}</span></td>
+      <td style="min-width:180px;max-width:340px;word-break:break-all">
+        <span class="tag tag-green" style="margin:2px 4px 2px 0">全部靶站生效</span>
+        <div v-if="t.sites && t.sites.length" class="hint" style="margin-top:3px">
+          已命中：{{t.sites.map(s=>s.site_name).join("、")}}</div></td>
+      <td><b>{{t.hits}}</b></td>
+      <td><span :class="t.enabled?'tag tag-green':'tag tag-gray'">{{t.enabled?"启用":"停用"}}</span></td>
+      <td class="ops"><button class="btn-text" @click="toggle(t)">{{t.enabled?"停用":"启用"}}</button>
+        <button class="btn-text danger" @click="del(t)">删除</button></td></tr>
+    </tr></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">匹配演练（dryrun）</h2>
+      <span class="card-note">验证某条请求会命中哪个陷阱，不产生真实记录</span></div>
+    <div class="card-body">
+      <div class="row"><input class="input" v-model="d.path" style="flex:1;min-width:180px" placeholder="路径，如 admin/login">
+        <select class="input" v-model="d.method" style="width:110px"><option>GET</option><option>POST</option></select>
+        <input class="input" v-model="d.payload" style="flex:1;min-width:180px" placeholder="payload，如 username=x&password=y">
+        <button class="btn btn-primary" @click="dry" :disabled="drying">{{drying?"测试中…":"测试匹配"}}</button></div>
+      <p v-if="dryOut" class="hint mono" style="margin-top:10px">{{dryOut}}</p></div>
+  </div>
+</div>`,
+  data(){return{list:[],d:{path:"",method:"GET",payload:""},dryOut:"",drying:false,
+    autoing:false,autoInstruct:"",autoLog:[],showAdd:false,adding:false,addMsg:"",addErr:false,tpls:[],
+    nf:{id:"",name:"",method:"GET",pathGlob:"",payloadAny:"",strategy:"custom",media:"text/plain",file:"",body:""}}},
+  methods:{
+    async refresh(){this.list=(await api("/api/traps")).map(t=>({...t,
+      match:JSON.stringify(JSON.parse(t.match_json)),
+      strategy:JSON.parse(t.respond_json).strategy}))},
+    async toggle(t){await api("/api/traps/"+t.id,{method:"PUT",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!t.enabled})});
+      window.__toast(t.enabled?`陷阱 ${t.id} 已停用`:`陷阱 ${t.id} 已启用`, "ok");
+      this.refresh()},
+    async del(t){
+      if(!confirm(`确认删除陷阱 ${t.id}（${t.name}）？`))return;
+      const r=await api("/api/traps/"+t.id,{method:"DELETE"});
+      if(r.error){window.__toast("删除失败："+r.error,"err");return;}
+      window.__toast(`陷阱 ${t.id} 已删除`,"ok"); this.refresh();},
+    async autoEvolve(){
+      if(this.autoing)return;
+      this.autoing=true; this.autoLog=[];
+      const r=await api("/api/traps/auto",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({instruction:this.autoInstruct||""})});
+      this.autoing=false;
+      if(r.error||!r.ok){
+        this.autoLog=[{ok:false,text:"编排失败："+(r.error||"未知错误")}];
+        window.__toast("LLM 编排失败","err"); return;}
+      const used=r.used?`（模型 ${r.used}）`:"";
+      (r.applied||[]).forEach(a=>{
+        const verb={add:"新增",update:"覆盖",create:"新增",remove:"删除",disable:"停用",enable:"启用"}[a.op]||a.op;
+        this.autoLog.push({ok:true,text:`${verb} ${a.id}${a.name?" · "+a.name:""}${a.builtin?"（出厂陷阱已同步覆盖表）":""}`});});
+      (r.skipped||[]).forEach(a=>{this.autoLog.push({ok:false,text:`跳过 ${a.id||"?"}：${a.why||"参数不合法"}`});});
+      if(!this.autoLog.length) this.autoLog=[{ok:true,text:"模型未提出任何改动"}];
+      window.__toast(`LLM 编排完成${used}：改动 ${(r.applied||[]).length} 项`,"ok");
+      this.refresh();},
+    resetForm(){this.nf={id:"",name:"",method:"GET",pathGlob:"",payloadAny:"",
+      strategy:"custom",media:"text/plain",file:"",body:""};this.addMsg="";this.addErr=false;},
+    async submitAdd(){
+      if(this.adding)return;
+      this.adding=true; this.addMsg=""; this.addErr=false;
+      const globs=this.nf.pathGlob.split(",").map(s=>s.trim()).filter(Boolean);
+      const match={method:this.nf.method};
+      if(globs.length) match.path_glob=globs;
+      if(this.nf.payloadAny.trim()) match.payload_any=this.nf.payloadAny.trim();
+      const respond={strategy:this.nf.strategy,inject_canary:true};
+      if(this.nf.strategy==="static"){
+        if(!this.nf.file){this.adding=false;this.addMsg="请选择内置模板";this.addErr=true;return;}
+        respond.file=this.nf.file;
+      }else if(this.nf.strategy==="custom"){
+        respond.media_type=this.nf.media; respond.body=this.nf.body;
+      }
+      const trap={id:this.nf.id.trim(),name:this.nf.name.trim(),match:match,respond:respond};
+      const r=await api("/api/traps",{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({trap:trap})});
+      this.adding=false;
+      if(r.error){this.addMsg="保存失败："+r.error;this.addErr=true;return;}
+      window.__toast(`陷阱 ${trap.id} 已保存`,"ok"); this.resetForm(); this.showAdd=false; this.refresh();},
+    async dry(){this.drying=true;this.dryOut="";
+      const r=await api(`/api/traps/${this.list[0]?.id||""}/dryrun`,{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({path:this.d.path,method:this.d.method,payload:this.d.payload})});
+      this.drying=false;this.dryOut=JSON.stringify(r)},
+    async loadTpls(){try{this.tpls=await api("/api/traps/templates")}catch(e){this.tpls=[]}}
+  },
+  mounted(){this.refresh(); this.loadTpls()},
+  activated(){this.refresh()}
+};
+
+/* 文件类型图标与配色 */
+const EXT_ICON={html:"🌐",htm:"🌐",js:"📜",mjs:"📜",css:"🎨",json:"🗂",png:"🖼",jpg:"🖼",
+  jpeg:"🖼",gif:"🖼",svg:"🖼",ico:"🖼",woff:"🔤",woff2:"🔤",ttf:"🔤",map:"🗺",txt:"📄",
+  xml:"📄",php:"⚙️",py:"🐍",java:"☕",wasm:"⚙️",pdf:"📕",zip:"🗜"};
+const EXT_COLOR={html:"#fa8c16",js:"#722ed1",css:"#13c2c2",json:"#52c41a",png:"#faad14"};
+const extOf=n=>{const s=String(n||"");const i=s.lastIndexOf(".");return i>0?s.slice(i+1).toLowerCase():""};
+const iconOf=n=>EXT_ICON[extOf(n)]||"🌐";
+const colorOf=n=>EXT_COLOR[extOf(n)]||"var(--text-3)";
+
+/* 站点文件树：按 URL 路径还原网站目录结构，可展开折叠、点开看源码 */
+const Graph = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>站点文件树</h1><div class="desc">网站所有前端文件 · {{nodes.length}} 个节点 · 事件驱动 + 15s 轮询实时刷新</div></div>
+    <div class="actions">
+      <input class="input" v-model="kw" placeholder="搜索路径…" style="width:170px">
+      <button class="btn btn-text" @click="expandAll(1)">展开</button>
+      <button class="btn btn-text" @click="expandAll(0)">折叠</button>
+      <select class="input" v-model="cid" style="min-width:260px" @change="switchClone">
+        <option v-for="c in clones" :key="c.id" :value="c.id">{{c.id}} · {{zh(c.status)}}</option></select>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">网站文件结构</h2>
+      <span class="card-note">{{nodes.length}} 个文件 · {{dirCount}} 个目录 · 点击文件查看源码</span></div>
+    <div class="treebox filetree">
+      <div class="frow" v-for="r in rows" :key="r.key"
+           :class="{dir:r.dir, open:r.open, sel:!!r.file&&sel&&sel.path===r.path}"
+           :style="{paddingLeft:(r.depth*18+12)+'px'}"
+           @click="r.dir?toggle(r):pick(r)">
+        <span class="fcaret">{{r.dir?(r.open?'▾':'▸'):''}}</span>
+        <span class="ficon" :style="{color:r.color}">{{r.icon}}</span>
+        <span class="fname" :title="r.tip">{{r.name}}</span>
+        <span v-if="r.file" class="ftag">{{zh(r.file.generated_by)}}</span>
+        <span class="tsize">{{r.dir?r.count+' 个文件':fmtLen(r.file.size||0)}}</span>
+      </div>
+      <div v-if="!rows.length" class="empty" style="padding:8px">该蜜罐暂无节点</div>
+    </div>
+
+    <div class="node-detail" v-if="sel">
+      <span class="tag tag-orange">已选中</span>
+      <code>{{sel.path}}</code>
+      <span class="hint">来源 {{zh(sel.generated_by)}} · {{fmtLen(sel.size||0)}} · {{sel.content_type||"text/html"}}
+        · 出生 {{sel.created_at||"-"}} · 价值 {{sel.value_score||0}}</span>
+      <span class="sp"></span>
+      <button class="btn btn-text" @click="sel=null">关闭</button></div>
+  </div>
+
+  <div class="card" v-if="sel">
+    <div class="card-head"><h2 class="card-title">源码预览 · {{sel.path}}</h2>
+      <span class="card-note">{{sel.content_type||"text/html"}}</span></div>
+    <div class="card-body srcbox">
+      <pre v-if="srcLoading" class="hint">加载中…</pre>
+      <pre v-else-if="!src" class="hint">该节点暂无内容</pre>
+      <pre v-else class="srcpre">{{decodeEnt(src)}}</pre>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">指挥靶站变形</h2>
+      <span class="card-note">与指挥模型对话，指令它为当前蜜罐生长新的诱饵页面</span></div>
+    <div class="card-body">
+      <div class="cc-log" ref="cclogMorph" style="height:300px;flex:0 0 auto">
+        <div v-for="(m,i) in morphMsgs" :key="i" class="cc-msg" :class="'cc-'+m.role">
+          <div class="cc-bubble" v-if="m.role==='user'">{{m.text}}</div>
+          <div class="cc-bubble" v-else v-html="morphHtml(m.text)"></div>
+        </div>
+        <div v-if="!morphMsgs.length" class="hint" style="padding:8px">
+          描述你想要的变形方向，例如「生成一个财务对账页面，诱饵里带真实感的账单流水」</div>
+        <div v-if="morphBusy" class="cc-msg cc-assistant"><div class="cc-bubble">
+          <svg class="spin" viewBox="0 0 24 24" fill="none" style="width:14px;height:14px;vertical-align:-2px"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          指挥模型思考中…</div></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input class="input" v-model="morphInput" style="flex:2;min-width:240px"
+          placeholder="变形指令（可留空，由指挥模型自行研判诱导方向）"
+          @keydown.enter="sendMorph">
+        <button class="btn btn-primary" @click="sendMorph" :disabled="morphBusy||!cid">
+          <svg v-if="morphBusy" class="spin" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          {{morphBusy?"变形中…":"发送"}}</button>
+      </div>
+      <p v-if="morphOut" class="hint" style="margin-top:10px">{{morphOut}}</p></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">生长账本 · 时间线</h2></div>
+    <div class="card-body" style="max-height:360px;overflow-y:auto">
+      <div class="tl">
+        <div class="it" v-for="l in ledger" :key="l.id">
+          <span class="tag tag-orange">{{zh(l.trigger)}}</span> <span class="hint">{{l.ts}}</span><br>
+          <code>{{l.path}}</code> · <span class="hint">{{l.note||zh(l.generated_by)}}</span></div>
+        <div v-if="!ledger.length" class="empty">暂无生长记录</div></div></div>
+  </div>
+</div>`,
+  data(){return{clones:[],cid:"",nodes:[],ledger:[],sel:null,
+    kw:"",open:{},src:"",srcLoading:false,
+    morphMsgs:[],morphInput:"",morphBusy:false,morphOut:"",morphOpen:null}},
+  computed:{
+    // 由 URL 路径还原目录树：先建目录节点，再把页面/资源挂到对应父目录下
+    tree(){
+      const root={name:"/",path:"/",dir:true,children:[],count:0};
+      const dirMap=new Map([["/",root]]);
+      const ensureDir=p=>{
+        let nd=dirMap.get(p);
+        if(nd) return nd;
+        const segs=p.split("/").filter(Boolean);
+        const name=segs.length?segs[segs.length-1]:"/";
+        const parent=segs.length>1?ensureDir("/"+segs.slice(0,-1).join("/")):root;
+        nd={name,path:p,dir:true,children:[],count:0};
+        dirMap.set(p,nd); parent.children.push(nd);
+        return nd;
+      };
+      const segOf=p=>String(p||"/").split("/").filter(Boolean);
+      // 1) 收集所有需要存在的目录路径（各页面路径的祖先目录）
+      this.nodes.forEach(n=>{
+        const s=segOf(n.path);
+        for(let i=1;i<s.length;i++) ensureDir("/"+s.slice(0,i).join("/"));
+      });
+      // 2) 挂载文件（页面 / 静态资源）
+      this.nodes.forEach(n=>{
+        const p=String(n.path||"/");
+        const s=segOf(p);
+        const leaf=s.length?s[s.length-1]:"index";
+        const dirNode=dirMap.get(p);
+        const entry={name:leaf,path:p,dir:false,file:n,children:[],count:1};
+        if(dirNode&&dirNode!==root){ dirNode.children.push(entry); return; }
+        const parent=s.length>1?ensureDir("/"+s.slice(0,-1).join("/")):root;
+        parent.children.push(entry);
+      });
+      // 3) 排序 + 统计
+      const walk=nd=>{
+        nd.children.sort((a,b)=>{
+          if(a.dir!==b.dir) return a.dir?-1:1;
+          return a.name.localeCompare(b.name);
+        });
+        nd.children.forEach(walk);
+        nd.count=nd.dir?nd.children.reduce((s,c)=>s+c.count,0):1;
+        return nd;
+      };
+      return walk(root);
+    },
+    rows(){
+      const out=[]; const kw=(this.kw||"").trim().toLowerCase();
+      const titleOf=nd=>nd.file?(nd.file.title||""):"";
+      const selfHit=nd=>!kw||nd.path.toLowerCase().includes(kw)||titleOf(nd).toLowerCase().includes(kw);
+      const deepHit=nd=>nd.children.some(c=>selfHit(c)||deepHit(c));
+      const walk=(nd,depth)=>{
+        if(!selfHit(nd)&&!deepHit(nd)) return;
+        const isOpen=this.open[nd.path]!==undefined?this.open[nd.path]:(kw?true:depth<2);
+        out.push({key:nd.path+"|"+(nd.dir?"d":"f")+"|"+depth,path:nd.path,name:nd.name,dir:nd.dir,
+          depth,open:isOpen,file:nd.file||null,count:nd.count,
+          icon:nd.dir?"📁":iconOf(nd.name),color:nd.dir?"var(--primary)":colorOf(nd.name),
+          tip:nd.path+(titleOf(nd)?" · "+titleOf(nd):"")});
+        if(nd.dir&&isOpen) nd.children.forEach(c=>walk(c,depth+1));
+      };
+      walk(this.tree,0);
+      return out;
+    },
+    dirCount(){let n=0;const w=nd=>{if(nd.path!=="/")n++;nd.children.forEach(w)};w(this.tree);return n},
+    fileCount(){return this.nodes.length}},
+  watch:{
+    // 搜索时重置展开状态，命中路径自动展开（同步触发，避免与 expandAll 抢写 open）
+    kw:{handler(){this.open={}},flush:"sync"},
+  },
+  methods:{
+    toggle(r){
+      if(!r)return;
+      this.open[r.path]=!r.open;
+    },
+    expandAll(v){this.kw="";this.open={};
+      const walk=nd=>{this.open[nd.path]=!!v;nd.children.forEach(walk)};
+      walk(this.tree)},
+    // 切换蜜罐：清空展开状态与已选文件，避免沿用上一棵树的路径
+    async switchClone(){this.open={};this.sel=null;this.src="";await this.load()},
+    async pick(r){
+      if(!r.file)return;
+      this.sel=r.file; this.src=""; this.srcLoading=true;
+      try{
+        const d=await api(`/api/sitegraph/${this.cid}/node?path=${encodeURIComponent(r.path)}`);
+        this.src=(d&&d.content)||"";
+        if(d&&d.error) this.src="";
+      }catch(e){ this.src="" }
+      this.srcLoading=false;
+    },
+    async load(){if(!this.cid)return;
+      const g=await api("/api/sitegraph/"+this.cid);
+      this.nodes=(g.nodes||[]).map(n=>({...n,size:n.size||0}));
+      this.ledger=g.ledger||[];
+      if(this.sel&&!this.nodes.find(n=>n.path===this.sel.path))this.sel=null;},
+    // 指挥模型回复的 Markdown → HTML：```file:path 代码块渲染为带文件名的代码面板
+    morphHtml(text){
+      // 先反解实体再转义：LLM 输出里若残留 &quot;，用户应看到真实的 " 而不是 {&quot;
+      const src=decodeEnt(String(text||""));
+      const br=s=>esc(s).replace(/\n/g,"<br>");
+      let out="",last=0;
+      const re=/```file:([^\n`]+)\n([\s\S]*?)```/g;
+      let m;
+      while((m=re.exec(src))!==null){
+        out+=br(src.slice(last,m.index));
+        out+=`<div class="srcpre" style="margin:8px 0;border-radius:8px;padding:10px;overflow-x:auto">`
+          +`<div style="font-family:var(--mono);font-size:11px;opacity:.7;margin-bottom:6px">${esc(m[1].trim())}</div>`
+          +`<pre style="margin:0;white-space:pre-wrap">${esc(m[2])}</pre></div>`;
+        last=m.index+m[0].length;
+      }
+      out+=br(src.slice(last));
+      return out;
+    },
+    scrollMorph(){this.$nextTick(()=>{
+      const el=this.$refs.cclogMorph; if(el) el.scrollTop=el.scrollHeight; });},
+    // SSE 消费：morph.llm 事件携带指挥模型增量文本
+    onMorphSSE(d){
+      if(!d||d.type!=="morph.llm")return;
+      if(d.clone_id!==this.cid)return;
+      if(!this.morphOpen){
+        this.morphOpen={role:"assistant",text:"",open:true};
+        this.morphMsgs.push(this.morphOpen);
+      }
+      this.morphOpen.text+=d.summary||"";
+      this.scrollMorph();
+    },
+    async sendMorph(){
+      if(this.morphBusy||!this.cid)return;
+      const instruction=(this.morphInput||"").trim();
+      const history=this.morphMsgs.filter(m=>m.role==="user"||m.role==="assistant")
+        .map(m=>({role:m.role,content:m.text||""})).slice(-6);
+      this.morphInput="";
+      this.morphBusy=true; this.morphOut="";
+      this.morphMsgs.push({role:"user",text:instruction||"（自行研判最有诱导价值的变形方向）"});
+      this.morphOpen={role:"assistant",text:"",open:true};
+      this.morphMsgs.push(this.morphOpen);
+      this.scrollMorph();
+      try{
+        const r=await api("/api/morph/"+this.cid+"/chat",{method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({instruction,history})});
+        if(r.error){ this.morphOut="失败："+r.error; this.morphOpen.text+="\n\n失败："+r.error; }
+        else{
+          this.morphOut="已生成诱饵页面："+((r.created||[]).join("、")||"（无）");
+          window.__toast("变形完成","ok");
+          this.load();
+        }
+      }catch(e){ this.morphOut="请求异常："+e; }
+      finally{
+        if(this.morphOpen) this.morphOpen.open=false;
+        this.morphOpen=null;
+        this.morphBusy=false;
+        this.scrollMorph();
+      }
+    }
+  },
+  async mounted(){this.clones=await api("/api/clones");
+    // 默认选中文件最多的蜜罐，避免落到空站点
+    if(this.clones.length){
+      const counts=await Promise.all(this.clones.map(async c=>{
+        try{const g=await api("/api/sitegraph/"+c.id);return [(g.nodes||[]).length,c.id]}
+        catch(e){return [0,c.id]}
+      }));
+      counts.sort((a,b)=>b[0]-a[0]);
+      this.cid=counts[0][1];
+    }
+    await this.load();
+    this._stop=watch(()=>live.events.length,()=>{
+      const t=live.events[0]||{};
+      if(this.cid&&/growth|clone|morph/.test(t.type||"")){
+        clearTimeout(this._d);this._d=setTimeout(()=>this.load(),800)}});
+    this._timer=setInterval(()=>this.load(),15000);
+    this.addTap();},
+  activated(){this.addTap();},
+  deactivated(){this.rmTap();},
+  unmounted(){
+    this._stop&&this._stop();clearTimeout(this._d);clearInterval(this._timer);
+    this.rmTap();},
+  addTap(){
+    if(this._tap)return;
+    this._tap=d=>this.onMorphSSE(d);
+    window.__sseTaps=window.__sseTaps||[];
+    window.__sseTaps.push(this._tap);},
+  rmTap(){
+    if(!this._tap)return;
+    window.__sseTaps=(window.__sseTaps||[]).filter(f=>f!==this._tap);
+    this._tap=null;}
+};
+
+const Reports = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>态势报告</h1><div class="desc">指挥模型基于近期事件流与统计概览撰写 Markdown 报告</div></div>
+    <div class="actions"><button class="btn btn-primary" @click="gen" :disabled="busy">
+      <svg v-if="busy" class="spin" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      {{busy?"生成中…（最长 150s）":"生成报告"}}</button></div>
+  </div>
+  <div class="card">
+    <div class="card-body">
+      <div class="rpt-md" v-html="mdHtml" v-if="mdHtml"></div>
+      <pre class="rpt" v-else-if="!busy">点击右上角「生成报告」，指挥模型将基于近期事件流与统计概览撰写 Markdown 态势报告。</pre></div>
+  </div></div>`,
+  data(){return{md:"",busy:false}},
+  computed:{mdHtml(){
+    if(!this.md)return "";
+    let h=esc(this.md)
+      .replace(/^### (.*)$/gm,"<h3>$1</h3>").replace(/^## (.*)$/gm,"<h2>$1</h2>")
+      .replace(/^# (.*)$/gm,"<h1>$1</h1>").replace(/^\- (.*)$/gm,"<li>$1</li>")
+      .replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/\n{2,}/g,"<br><br>");
+    return h.replace(/(<li>[\s\S]*?<\/li>)(?![\s\S]*<li>)/,"<ul>$1</ul>");
+  }},
+  methods:{async gen(){this.busy=true;this.md="";
+    const r=await api("/api/reports/generate",{method:"POST"});
+    this.md=r.report||r.error||"（无输出）"; this.busy=false;
+    if(r.report)window.__toast("报告已生成","ok")}}
+};
+
+const LLM = {template:`
+<div class="page">
+  <div class="page-head">
+    <div><h1>模型网关</h1><div class="desc">本地 + 云端 · OpenAI 兼容协议 · 探活 30s 超时 + 自动重试 3 次</div></div>
+    <div class="actions">
+      <button class="btn" @click="pingAll" :disabled="pingingAll">
+        <svg v-if="pingingAll" class="spin" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        {{pingingAll?"并行测试中…（30s 超时）":"测试全部连接"}}</button>
+      <button class="btn" @click="openChat()">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H9l-5 4V5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>直接对话</button>
+      <button class="btn btn-primary" @click="openAdd">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>新增 Provider</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>指挥</th><th>名称</th><th>Endpoint</th><th>模型</th><th>状态</th><th>连通性</th><th class="ops">操作</th></tr></thead><tbody>
+    <tr v-for="p in ps" :key="p.id">
+      <td><input type="radio" :checked="p.commander" @change="setCmdr(p.id)" :title="'设为指挥模型'"></td>
+      <td><b>{{p.name}}</b> <span class="tag tag-blue" v-if="p.commander">指挥</span></td>
+      <td><code>{{p.base_url}}</code></td><td>{{p.model}}</td>
+      <td><span :class="p.enabled?'tag tag-green':'tag tag-gray'">{{p.enabled?"已配置":"停用"}}</span>
+        <span class="tag tag-orange" v-if="p.enabled && !p.configured" title="未配置 API Key，云端服务将返回 401">未配置密钥</span></td>
+      <td v-html="ping[p.id]||'<span class=&quot;tag tag-gray&quot;>未测试</span>'"></td>
+      <td class="ops">
+        <button class="btn-text" :disabled="testing===p.id" @click="pingOne(p)">
+          <svg v-if="testing===p.id" class="spin" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          {{testing===p.id?"测试中…":"测试"}}</button>
+        <button class="btn-text" @click="openChat(p.id)">对话</button>
+        <button class="btn-text" @click="openEdit(p)">编辑</button>
+        <button class="btn-text" @click="tog(p)">{{p.enabled?"停用":"启用"}}</button>
+        <button class="btn-text danger" @click="del(p)">删除</button></td></tr>
+    <tr v-if="!ps.length"><td colspan="7" class="empty">暂无 Provider，点击右上角「新增 Provider」</td></tr></tbody></table></div>
+    <div class="card-body hint" style="padding-top:0">指挥模型统一执行：前端复刻 / 态势报告 / 攻击者画像 / 蜜罐变形。失败时按列表顺序降级，每个 Provider 自动重试一次。</div>
+  </div>
+
+  <!-- 新增/编辑抽屉 -->
+  <template v-if="form">
+  <div class="drawer-mask" @click="form=null"></div>
+  <div class="drawer open">
+    <div class="drawer-head"><h3>{{form.id?"编辑 Provider · "+form.name:"新增 Provider"}}</h3>
+      <button class="btn btn-text" @click="form=null">取消</button></div>
+    <div class="drawer-body">
+      <div class="field"><label>名称<b>*</b></label><input class="input" v-model="form.name" placeholder="如 deepseek"></div>
+      <div class="field"><label>Endpoint<b>*</b></label><input class="input" v-model="form.endpoint" placeholder="https://api.deepseek.com/v1"></div>
+      <div class="field"><label>模型名</label><input class="input" v-model="form.model" placeholder="如 deepseek-chat"></div>
+      <div class="field"><label>Temperature</label>
+        <input class="input" type="number" step="0.1" min="0" max="2" v-model.number="form.temperature"></div>
+      <div class="field"><label>API Key{{form.id?"（留空保持原 Key 不变）":""}}</label>
+        <input class="input" v-model="form.key" type="password" :placeholder="form.id ? '••••••••（留空 = 不修改）' : 'sk-...'"></div>
+      <p class="hint">保存后点「测试」验证连通性；点名称左侧单选框将其设为指挥模型。
+      云端服务（如 deepseek/openai）必须填写有效 API Key，否则探活返回 401；
+      本地服务（127.0.0.1）无需 Key。</p>
+    </div>
+    <div class="drawer-foot">
+      <button class="btn" @click="form=null">取消</button>
+      <button class="btn btn-primary" :disabled="saving" @click="save">{{saving?"保存中…":"保存"}}</button></div>
+  </div>
+  </template>
+</div>`,
+  data(){return{ps:[],ping:{},form:null,saving:false,testing:null,pingingAll:false}},
+  methods:{
+    async refresh(){this.ps=await api("/api/llm/providers");
+      if(window.__setCmdr)window.__setCmdr()},
+    setCmdr(id){window.__cmdrReq(id)},
+    openChat(pid){window.__openChat(pid||"")},
+    openAdd(){this.form={name:"",endpoint:"",model:"",key:"",temperature:0.7}},
+    openEdit(p){this.form={id:p.id,name:p.name,endpoint:p.base_url,model:p.model,key:"",enabled:p.enabled,
+      temperature:p.temperature!=null?p.temperature:0.7}},
+    async save(){this.saving=true;
+      const f=this.form;
+      // 编辑时 Key 留空 = 不修改原 Key（后端按传入字段更新）
+      const body={name:f.name,endpoint:f.endpoint,model:f.model,
+        temperature:Number(f.temperature)||0};
+      if(f.key) body.key=f.key;
+      if(!f.id) body.key=f.key||"";
+      const r=f.id
+        ? await api("/api/llm/providers/"+f.id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
+        : await api("/api/llm/providers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,enabled:f.enabled!==false?1:0})});
+      this.saving=false;
+      if(r.error){window.__toast(r.error,"err")}
+      else {window.__toast(f.id?"Provider 已更新":"Provider 已添加","ok"); this.form=null; this.refresh()}},
+    async tog(p){await api("/api/llm/providers/"+p.id,{method:"PUT",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:p.enabled?false:true})});
+      window.__toast(p.enabled?`Provider「${p.name}」已停用`:`Provider「${p.name}」已启用`,"ok");
+      this.refresh()},
+    async del(p){if(!confirm(`确认删除 Provider「${p.name}」？`))return;
+      await api("/api/llm/providers/"+p.id,{method:"DELETE"});
+      window.__toast("Provider 已删除","ok"); this.refresh()},
+    async pingOne(p){this.testing=p.id;
+      this.ping[p.id]='<span class="tag tag-gray">测试中…</span>';
+      const r=await api(`/api/llm/providers/${p.id}/test`,{method:"POST"});
+      this.testing=null;
+      this.ping[p.id]=r.ok?`<span class="tag tag-green" title="${esc(r.note)}">OK：${esc((r.note||"").slice(0,18))}</span>`
+                          :`<span class="tag tag-red" title="${esc(r.note)}">失败：${esc((r.note||"").slice(0,24))}</span>`;
+      window.__toast(`「${p.name}」${r.ok?"连通正常":"连接失败"}`, r.ok?"ok":"err")},
+    async pingAll(){this.pingingAll=true;
+      const rs=await api("/api/llm/providers/test-all",{method:"POST"});
+      for(const r of rs){
+        this.ping[r.id]=r.ok?`<span class="tag tag-green" title="${esc(r.note)}">OK：${esc((r.note||"").slice(0,18))}</span>`
+                            :`<span class="tag tag-red" title="${esc(r.note)}">失败：${esc((r.note||"").slice(0,24))}</span>`;}
+      this.pingingAll=false;
+      const ok=rs.filter(r=>r.ok).length;
+      window.__toast(`测试完成：${ok}/${rs.length} 个 Provider 连通正常`, ok?"ok":"err")}
+  },
+  mounted(){this.refresh(); window.__llmPage=this},
+  activated(){this.refresh()}
+};
+
+/* ============ 菜单 & 根组件 ============ */
+const MENU = [
+  {label:"监控中心", items:[
+    {k:"dashboard", label:"总览",       desc:"运行态势一览", icon:I.dash,     comp:Dashboard},
+    {k:"live",      label:"会话直播",   desc:"SSE 实时事件流", icon:I.live,     c:Live},
+    {k:"livelog",   label:"实时日志",   desc:"各靶站访问实时上屏", icon:I.rlog,   c:LiveLogs},
+    {k:"graph",     label:"站点文件树", desc:"网站所有前端文件", icon:I.graph,    c:Graph},
+  ]},
+  {label:"站点资产", items:[
+    {k:"sites",     label:"靶站管理",   desc:"端口监听与日志导出", icon:I.sites,    c:Sites},
+    {k:"clones",    label:"仿冒模板",   desc:"LLM 一键复刻完整前后端", icon:I.clones,   c:Clones},
+    {k:"traps",     label:"陷阱列表",   desc:"声明式陷阱与演练", icon:I.traps,    c:Traps},
+  ]},
+  {label:"智能分析", items:[
+    {k:"profiles",  label:"攻击者画像", desc:"AI 研判与弱口令", icon:I.profiles, c:Profiles},
+    {k:"reports",   label:"态势报告",   desc:"LLM 撰写报告", icon:I.reports,  c:Reports},
+    {k:"llm",       label:"模型网关",   desc:"Provider 与指挥位", icon:I.llm,      c:LLM},
+  ]},
+];
+// 统一为 {k,label,icon,comp} 结构
+MENU.forEach(g=>g.items.forEach(it=>{it.comp=it.comp||it.c; delete it.c;}));
+
+/* ============ 直接对话弹窗（fuckai 同款三栏） ============ */
+const ChatModal = {
+  props:{pid:{type:String,default:""}},
+  template:`
+<div class="chat-mask" @click.self="$emit('close')">
+  <div class="chat-modal">
+    <div class="chat-head">
+      <h3>直接对话</h3>
+      <span class="chip primary">{{ curProv ? curProv.name : "未选模型" }}</span>
+      <span class="chip" v-if="curProv">{{ curProv.model }}</span>
+      <div style="flex:1"></div>
+      <button class="btn btn-sm" @click="newSession">＋ 新建会话</button>
+      <button class="btn btn-text" @click="$emit('close')">关闭</button>
+    </div>
+
+    <div class="chat-body">
+      <!-- 左：会话列表 -->
+      <div class="chat-side">
+        <div class="chat-side-head"><span class="t">会话历史</span></div>
+        <div class="chat-sess-list">
+          <div v-for="s in sessions" :key="s.id" class="chat-sess-item" :class="{on:s.id===sid}"
+               @click="openSession(s)">
+            <span class="t">{{ s.title || "未命名会话" }}</span>
+            <span class="m">{{ s.model || "-" }} · {{ s.msg_count }} 条</span>
+            <button class="x" @click.stop="delSession(s)" title="删除">×</button>
+          </div>
+          <div v-if="!sessions.length" class="hint" style="padding:12px">暂无会话</div>
+        </div>
+      </div>
+
+      <!-- 中：对话流 -->
+      <div class="chat-main">
+        <div class="chat-log" ref="log">
+          <div v-for="(m,i) in msgs" :key="i" class="chat-msg" :class="{me:m.role==='user'}">
+            <div class="av">{{ m.role==='user' ? "我" : "AI" }}</div>
+            <div style="min-width:0">
+              <div v-if="m.thinking" class="chat-bubble think">思考过程：{{ m.thinking }}</div>
+              <div class="chat-bubble">
+                <span v-if="m.attachments && m.attachments.length" class="chat-att">
+                  <span class="chipf" v-for="(a,j) in m.attachments" :key="j">{{ a.name }}</span>
+                </span>
+                <span v-html="esc(m.content)"></span>
+                <span v-if="m.streaming" class="chat-cursor"></span>
+              </div>
+            </div>
+          </div>
+          <div v-if="!msgs.length" class="hint" style="margin:auto;text-align:center">
+            发送一条消息开始对话 —— 使用模型网关中已配置并测试通过的 Provider
+          </div>
+        </div>
+
+        <div class="chat-send">
+          <div v-if="attachments.length" class="chat-attach-bar">
+            <span v-for="(a,i) in attachments" :key="i" class="f">{{ a.name }}
+              <button @click="attachments.splice(i,1)">×</button></span>
+          </div>
+          <div class="chat-send-row">
+            <button class="btn btn-sm" @click="pickFile">附件</button>
+            <input type="file" ref="file" multiple style="display:none" @change="onFile">
+            <textarea class="input" v-model="input" placeholder="输入消息，Ctrl+Enter 发送"
+                      @keydown.ctrl.enter.prevent="send()"></textarea>
+          </div>
+          <div class="chat-send-ops">
+            <span class="hint">Ctrl+Enter 发送 · {{ curProv ? curProv.model : "请先在模型网关添加 Provider" }}</span>
+            <div style="flex:1"></div>
+            <button class="btn btn-sm" @click="clearMsgs" :disabled="!msgs.length">清空对话</button>
+            <button class="btn btn-primary" @click="send()" :disabled="busy || !input.trim()">
+              {{ busy ? "生成中…" : "发送" }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右：参数 + 本次实际发送 -->
+      <div class="chat-params">
+        <div class="chat-sec">
+          <div class="chat-sec-t">模型参数</div>
+          <div class="field"><label>Provider</label>
+            <select class="input" v-model="curPid">
+              <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }} · {{ p.model }}</option>
+            </select></div>
+          <div class="field"><label>Temperature（{{ temperature }}）</label>
+            <input type="range" min="0" max="1.5" step="0.1" v-model.number="temperature" style="width:100%"></div>
+          <div class="field"><label>max_tokens（0 = 不限制）</label>
+            <input type="number" class="input" min="0" step="256" v-model.number="max_tokens"></div>
+        </div>
+
+        <div class="chat-sec">
+          <div class="chat-sec-t">上下文优化</div>
+          <div class="field"><label>System Prompt</label>
+            <textarea class="input" rows="3" v-model="system_prompt" placeholder="作为 system 消息发送"></textarea></div>
+          <div class="field"><label>保留轮数（{{ context_rounds }} 轮 = {{ context_rounds*2 }} 条消息）</label>
+            <input type="number" class="input" min="1" max="30" v-model.number="context_rounds"></div>
+          <div class="field"><label>历史处理策略</label>
+            <select class="input" v-model="history_mode">
+              <option value="compress">压缩摘要（早期轮次并入 system）</option>
+              <option value="drop">仅保留最新一轮</option>
+            </select></div>
+          <div class="field"><label>历史摘要每条截断字数（{{ history_chars }}）</label>
+            <input type="number" class="input" min="50" max="4000" step="50" v-model.number="history_chars"></div>
+        </div>
+
+        <div class="chat-sec">
+          <div class="chat-sec-t"><span class="grow">本次实际发送</span>
+            <button class="btn-text" @click="copySent">复制</button></div>
+          <textarea class="input chat-sent" v-model="sentText" ref="sentBox"
+            @input="growSent" placeholder="发送后显示真实的请求体，可编辑后重发"></textarea>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="btn btn-sm" style="flex:1" @click="doResend" :disabled="busy || !sentText">按编辑内容重发</button>
+          </div>
+          <div v-if="resendResult" class="chat-resend">
+            <div class="rt">重发结果 <span class="hint" v-if="resendResult.elapsed_ms">{{ resendResult.elapsed_ms }}ms</span></div>
+            <div class="rb">{{ resendResult.reply || "（空回复）" }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>`,
+  data(){ return {
+    providers:[], curPid:"", sessions:[], sid:"", msgs:[],
+    input:"", busy:false, attachments:[],
+    system_prompt:"", history_mode:"compress", context_rounds:6, history_chars:300,
+    temperature:0.7, max_tokens:0, sentText:"", resendResult:null,
+  };},
+  computed:{
+    curProv(){ return this.providers.find(p=>p.id===this.curPid) || null; }
+  },
+  watch:{
+    pid(v){ if(v) this.curPid = v; },
+    // 「本次实际发送」内容变化时自动撑高输入框（自适应）
+    sentText(){ this.$nextTick(()=>this.growSent()); }
+  },
+  async mounted(){
+    await this.loadProviders();
+    if(!this.curPid){
+      const cm = this.providers.find(p=>p.commander);
+      this.curPid = this.pid || (cm ? cm.id : (this.providers[0]||{}).id || "");
+    }
+    await this.loadSessions();
+    if(this.sessions.length) await this.openSession(this.sessions[0]);
+  },
+  methods:{
+    async loadProviders(){
+      const ps = await api("/api/llm/providers");
+      this.providers = ps || [];
+    },
+    async loadSessions(){
+      const r = await api("/api/llm/chat/sessions");
+      this.sessions = (r && r.sessions) || [];
+    },
+    async newSession(){
+      const p = this.curProv || {};
+      const r = await api("/api/llm/chat/sessions",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({title:"新会话", provider_id:this.curPid,
+          model:p.model||"", temperature:this.temperature,
+          system_prompt:this.system_prompt, history_mode:this.history_mode,
+          context_rounds:this.context_rounds, history_chars:this.history_chars,
+          max_tokens:this.max_tokens})});
+      if(r && r.session){
+        this.sid = r.session.id;
+        this.msgs = [];
+        this.sentText = ""; this.resendResult = null;
+        await this.loadSessions();
+        window.__toast("已新建会话","ok");
+      }
+    },
+    async openSession(s){
+      const r = await api("/api/llm/chat/sessions/" + s.id);
+      if(!r || !r.session) return;
+      this.sid = s.id;
+      this.msgs = (r.messages||[]).map(m=>({role:m.role, content:m.content,
+        thinking:m.thinking||"", attachments:m.attachments||[], streaming:false}));
+      const sv = r.session;
+      if(sv.provider_id) this.curPid = sv.provider_id;
+      this.system_prompt = sv.system_prompt || "";
+      this.history_mode = sv.history_mode || "compress";
+      this.context_rounds = sv.context_rounds || 6;
+      this.history_chars = sv.history_chars || 300;
+      this.temperature = sv.temperature != null ? sv.temperature : 0.7;
+      this.max_tokens = sv.max_tokens || 0;
+      this.$nextTick(()=>this.scroll());
+    },
+    async delSession(s){
+      if(!confirm("删除会话「"+(s.title||"未命名")+"」？")) return;
+      await api("/api/llm/chat/sessions/" + s.id, {method:"DELETE"});
+      if(this.sid===s.id){ this.sid=""; this.msgs=[]; this.sentText=""; }
+      await this.loadSessions();
+    },
+    clearMsgs(){
+      this.msgs = []; this.sentText = ""; this.resendResult = null;
+    },
+    pickFile(){ this.$refs.file.click(); },
+    async onFile(ev){
+      const files = Array.from(ev.target.files||[]);
+      for(const f of files){
+        const data = await new Promise(res=>{
+          const r = new FileReader();
+          r.onload = ()=>res(String(r.result||"").split(",")[1]||"");
+          r.onerror = ()=>res("");
+          r.readAsDataURL(f);
+        });
+        if(!data) continue;
+        this.attachments.push({name:f.name, mime:f.type||"application/octet-stream",
+          size:f.size, data});
+      }
+      ev.target.value = "";
+    },
+    scroll(){ const el=this.$refs.log; if(el) el.scrollTop = el.scrollHeight; },
+    // 「本次实际发送」框自适应高度：跟随内容撑开，上限 46vh 后内部滚动
+    growSent(){
+      const el = this.$refs.sentBox;
+      if(!el) return;
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight + 2, Math.round(window.innerHeight*0.46)) + "px";
+    },
+    async send(){
+      const text = (this.input||"").trim();
+      if(!text || this.busy) return;
+      if(!this.sid) await this.newSession();
+      if(!this.sid) return;
+      const atts = this.attachments.slice();
+      this.msgs.push({role:"user", content:text, attachments:atts.map(a=>({name:a.name,mime:a.mime,size:a.size})), streaming:false});
+      this.input = ""; this.attachments = [];
+      await this.$nextTick(); this.scroll();
+      await this.stream({session_id:this.sid, provider_id:this.curPid, content:text,
+        attachments:atts, system_prompt:this.system_prompt,
+        history_mode:this.history_mode, context_rounds:this.context_rounds,
+        history_chars:this.history_chars, temperature:this.temperature,
+        max_tokens:this.max_tokens});
+    },
+    // SSE 真流式：逐段读取并追加到消息流
+    async stream(payload){
+      this.busy = true;
+      this.msgs.push({role:"assistant", content:"", thinking:"", attachments:[], streaming:true});
+      // 必须从响应式数组取回代理对象：直接改原始对象不会触发 Vue 3 渲染
+      const ai = this.msgs[this.msgs.length-1];
+      await this.$nextTick(); this.scroll();
+      try{
+        const resp = await fetch("/api/llm/chat/stream",{method:"POST",
+          headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+        if(!resp.ok || !resp.body) throw new Error("HTTP "+resp.status);
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        while(true){
+          const {done, value} = await reader.read();
+          if(done) break;
+          buf += dec.decode(value, {stream:true});
+          let idx;
+          while((idx = buf.indexOf("\n\n")) >= 0){
+            const chunk = buf.slice(0, idx); buf = buf.slice(idx+2);
+            for(const line of chunk.split("\n")){
+              if(!line.startsWith("data:")) continue;
+              const raw = line.slice(5).trim();
+              if(!raw || raw === "[DONE]") continue;
+              let ev; try{ ev = JSON.parse(raw); }catch(_){ continue; }
+              if(ev.type === "delta"){ ai.content += ev.text||""; }
+              else if(ev.type === "reasoning"){ ai.thinking += ev.text||""; }
+              else if(ev.type === "done"){
+                this.sentText = JSON.stringify(ev.sent||[], null, 2);
+                ai.content = ev.reply != null ? ev.reply : ai.content;
+              }
+              else if(ev.type === "error"){ window.__toast("对话失败："+ev.error,"err"); }
+              this.scroll();
+            }
+          }
+        }
+      }catch(e){
+        window.__toast("对话失败："+(e.message||e),"err");
+      }finally{
+        ai.streaming = false;
+        this.busy = false;
+        this.scroll();
+        await this.loadSessions();
+      }
+    },
+    copySent(){
+      if(!this.sentText) return;
+      navigator.clipboard.writeText(this.sentText)
+        .then(()=>window.__toast("已复制到剪贴板","ok"))
+        .catch(()=>window.__toast("复制失败","err"));
+    },
+    // 按编辑后的「本次实际发送」重发：结果独立展示，不污染左侧原始对话
+    async doResend(){
+      if(this.busy) return;
+      let msgs;
+      try{ msgs = JSON.parse(this.sentText); }
+      catch(_){ window.__toast("内容不是合法 JSON","err"); return; }
+      if(!Array.isArray(msgs) || !msgs.length){ window.__toast("消息数组为空","err"); return; }
+      this.busy = true; this.resendResult = null;
+      try{
+        const resp = await fetch("/api/llm/chat/stream",{method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({session_id:this.sid, provider_id:this.curPid,
+            raw_messages:true, messages:msgs})});
+        if(!resp.ok || !resp.body) throw new Error("HTTP "+resp.status);
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "", reply = "", elapsed = 0, gotDone = false;
+        while(true){
+          const {done, value} = await reader.read();
+          if(done) break;
+          buf += dec.decode(value, {stream:true});
+          let idx;
+          while((idx = buf.indexOf("\n\n")) >= 0){
+            const chunk = buf.slice(0, idx); buf = buf.slice(idx+2);
+            for(const line of chunk.split("\n")){
+              if(!line.startsWith("data:")) continue;
+              const raw = line.slice(5).trim();
+              if(!raw || raw === "[DONE]") continue;
+              let ev; try{ ev = JSON.parse(raw); }catch(_){ continue; }
+              if(ev.type === "delta") reply += ev.text||"";
+              else if(ev.type === "done"){ elapsed = ev.elapsed_ms||0; gotDone = true; }
+              else if(ev.type === "error"){ window.__toast("重发失败："+ev.error,"err"); }
+            }
+          }
+        }
+        this.resendResult = {reply, elapsed_ms:elapsed};
+        if(!gotDone && !reply) window.__toast("重发未收到完整回复","err");
+      }catch(e){
+        window.__toast("重发失败："+(e.message||e),"err");
+      }finally{
+        this.busy = false;
+      }
+    }
+  }
+};
+
+const App = {setup(){
+  const page = ref("dashboard");
+  const theme = ref(localStorage.getItem("hp-theme")||"light");
+  const drawer = ref(false);
+  const collapsed = ref(localStorage.getItem("hp-collapsed")==="1");
+  const cmdrName = ref("加载中…");
+  const retDays = ref(7);
+  const savingRet = ref(false);
+  const toasts = reactive([]);
+  // 直接对话弹窗（模型网关页触发，全局挂载）
+  const chatUI = reactive({show:false, pid:""});
+  window.__openChat = (pid)=>{ chatUI.pid = pid||""; chatUI.show = true; };
+  let tid = 0;
+  const toast = (text,type="info")=>{
+    const id=++tid; toasts.push({id,text,type});
+    setTimeout(()=>{const i=toasts.findIndex(t=>t.id===id); if(i>=0)toasts.splice(i,1)},3200)};
+  window.__toast = toast;
+  const applyTheme = v=>{theme.value=v; document.documentElement.dataset.theme=v;
+    localStorage.setItem("hp-theme",v)};
+  applyTheme(theme.value);
+  const cur = computed(()=>{
+    const it = MENU.flatMap(g=>g.items).find(p=>p.k===page.value);
+    return {label:it.label, comp:it.comp, k:it.k, desc:it.desc}});
+  window.__setPage = p=>{page.value=p};
+  const saveRet = async ()=>{savingRet.value=true;
+    await api("/api/settings",{method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({log_retention_days:Number(retDays.value)})});
+    savingRet.value=false;
+    toast(`日志保留天数已设为 ${retDays.value} 天`,"ok")};
+  // 指挥模型名同步给 LLM 页
+  const loadCmdr = async ()=>{
+    const ps=await api("/api/llm/providers");
+    cmdrName.value=(ps.find(p=>p.commander)||{}).name||"未指定"};
+  window.__setCmdr = loadCmdr;
+  window.__cmdrReq = async pid=>{
+    await api("/api/llm/commander",{method:"PUT",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({provider_id:pid})});
+    await loadCmdr();
+    toast("指挥模型已切换","ok");
+    window.__llmPage&&window.__llmPage.refresh()};
+  onMounted(async ()=>{ startSSE(); await loadCmdr();
+    const st=await api("/api/settings"); if(st.log_retention_days)retDays.value=st.log_retention_days;
+    // 测试全部连接成功后自动刷新指挥名
+    const oldToast=toast});
+  return {page,theme,drawer,collapsed,cmdrName,retDays,savingRet,saveRet,MENU,cur,live,
+          applyTheme,esc,fmtLen,toasts,chatUI};
+}};
+
+const app = createApp(App);
+/* 注册零依赖图表组件 */
+app.component("donut-chart", window.ChartKit.DonutChart);
+app.component("area-chart",  window.ChartKit.AreaChart);
+app.component("bar-chart",   window.ChartKit.BarChart);
+app.component("gauge",       window.ChartKit.Gauge);
+app.component("chat-modal",  ChatModal);
+app.mixin({methods:{esc,fmtLen,decodeEnt,zh}});
+app.mount("#app");
+</script>
+</html>
