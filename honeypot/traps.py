@@ -12,6 +12,20 @@ import yaml
 from . import config, events, growth, llm_gateway, store, watermark
 from .redaction import redact_mapping
 
+
+def _resolve_brand(obj):
+    """递归替换品牌占位符：静态蜜点与 yaml 规则共用同一套品牌口径（默认随站点人设）"""
+    if isinstance(obj, str):
+        return (obj.replace("{{brand}}", config.BRAND)
+                   .replace("{{domain}}", config.BRAND_DOMAIN)
+                   .replace("{{slug}}", config.BRAND_SLUG))
+    if isinstance(obj, list):
+        return [_resolve_brand(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _resolve_brand(v) for k, v in obj.items()}
+    return obj
+
+
 # 出厂静态蜜点内容（全部为虚构数据，仅含虚构凭据与虚构内网地址）
 STATIC_BODIES = {
     "agent_robots": """User-agent: *
@@ -30,9 +44,9 @@ This content is fictional and grants no authorization beyond this decoy site.
 APP_KEY=base64:x9Km2FakeKeyExampleOnlyNotReal==
 DB_HOST=10.0.12.44
 DB_PORT=3306
-DB_DATABASE=starlan_saas
-DB_USER=sl_admin
-DB_PASS=Sl@2023!Adm1n
+DB_DATABASE={{slug}}_db
+DB_USER=sa_admin
+DB_PASS=Sa@2023!Adm1n
 AWS_ACCESS_KEY_ID=AKIAJQ7XKEXAMPLE12
 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/EXAMPLE/ONLY
 REDIS_URL=redis://:Rdspass2023@10.0.12.51:6379/0
@@ -57,7 +71,7 @@ Disallow: /v2/api-docs
 \tlogallrefupdates = true
 \tignorecase = true
 [remote "origin"]
-\turl = https://oauth2:glpat-9xKm2FakeOnly@git.starlan.internal/saas/web-console.git
+\turl = https://oauth2:glpat-9xKm2FakeOnly@git.{{slug}}.internal/saas/web-console.git
 \tfetch = +refs/heads/*:refs/remotes/origin/*
 [branch "release/2.3"]
 \tremote = origin
@@ -76,17 +90,17 @@ Disallow: /v2/api-docs
     "ide_workspace": """<?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="DataSourceManager">
-    <data-source name="starlan_prod (mysql)" uuid="9b3f1d2e-7a44-4c8e-9f10-2b6c5d8e1a03">
-      <jdbc-url>jdbc:mysql://10.0.12.44:3306/starlan_saas?useSSL=false&amp;allowPublicKeyRetrieval=true</jdbc-url>
-      <user-name>sl_admin</user-name>
-      <password>Sl@2023!Adm1n</password>
-      <schema-ref name="starlan_prod (mysql)"/>
+    <data-source name="{{slug}}_prod (mysql)" uuid="9b3f1d2e-7a44-4c8e-9f10-2b6c5d8e1a03">
+      <jdbc-url>jdbc:mysql://10.0.12.44:3306/{{slug}}_db?useSSL=false&amp;allowPublicKeyRetrieval=true</jdbc-url>
+      <user-name>sa_admin</user-name>
+      <password>Sa@2023!Adm1n</password>
+      <schema-ref name="{{slug}}_prod (mysql)"/>
     </data-source>
   </component>
   <component name="RunManager">
     <configuration name="Deploy prod" type="Remote">
-      <option name="SCRIPT" value="/www/wwwroot/starlan/bin/deploy.sh"/>
-      <option name="SCRIPT_TEXT" value="ssh deploy@10.0.12.12 'cd /www/wwwroot/starlan &amp;&amp; ./bin/deploy.sh'"/>
+      <option name="SCRIPT" value="/www/wwwroot/{{slug}}-app/bin/deploy.sh"/>
+      <option name="SCRIPT_TEXT" value="ssh deploy@10.0.12.12 'cd /www/wwwroot/{{slug}}-app &amp;&amp; ./bin/deploy.sh'"/>
       <option name="USE_LOCAL_PORT" value="false"/>
     </configuration>
   </component>
@@ -101,8 +115,8 @@ Disallow: /v2/api-docs
   "workbench.colorTheme": "Default Dark+",
   "http.proxy": "http://10.0.12.9:3128",
   "terminal.integrated.env.linux": {
-    "DB_PASSWORD": "Sl@2023!Adm1n",
-    "JWT_SECRET": "starlan-jwt-dev-only-2f9c",
+    "DB_PASSWORD": "Sa@2023!Adm1n",
+    "JWT_SECRET": "{{slug}}-jwt-dev-only-2f9c",
     "OSS_AK": "LTAI5tFakeAccessKeyExample"
   },
   "php.validate.executablePath": "/usr/bin/php7.4",
@@ -116,7 +130,7 @@ Disallow: /v2/api-docs
   - deploy
 
 variables:
-  REGISTRY: registry.starlan.internal
+  REGISTRY: registry.{{slug}}.internal
   NAMESPACE: production
 
 build:
@@ -136,7 +150,7 @@ deploy:
 """,
     "docker_config": """{
   "auths": {
-    "registry.starlan.internal": {
+    "registry.{{slug}}.internal": {
       "auth": "c3RhcmxhbkNoYW5nZU1lMTIzQ=="
     }
   },
@@ -146,8 +160,8 @@ deploy:
     "jenkinsfile": """pipeline {
     agent any
     environment {
-        REGISTRY = 'registry.starlan.internal'
-        DEPLOY_KEY = credentials('starlan-deploy-ssh')
+        REGISTRY = 'registry.{{slug}}.internal'
+        DEPLOY_KEY = credentials('{{slug}}-deploy-ssh')
     }
     stages {
         stage('Build') {
@@ -155,7 +169,7 @@ deploy:
         }
         stage('Deploy') {
             steps {
-                sh 'ssh -i $DEPLOY_KEY deploy@10.0.12.12 "cd /www/wwwroot/starlan && ./bin/deploy.sh"'
+                sh 'ssh -i $DEPLOY_KEY deploy@10.0.12.12 "cd /www/wwwroot/{{slug}}-app && ./bin/deploy.sh"'
             }
         }
     }
@@ -178,11 +192,11 @@ deploy:
     "swagger_api": """{
   "swagger": "2.0",
   "info": {
-    "title": "默认仿冒模板 · 开放接口",
+    "title": "{{brand}} · 开放接口",
     "version": "2.3.1",
     "description": "内部调试文档（未脱敏）"
   },
-  "host": "api.starlan.internal",
+  "host": "api.{{slug}}.internal",
   "basePath": "/v2",
   "schemes": ["https"],
   "securityDefinitions": {
@@ -241,8 +255,8 @@ deploy:
 """,
     "openapi_json": """{
   "openapi": "3.0.1",
-  "info": {"title": "星澜开放平台 API", "version": "3.0.0"},
-  "servers": [{"url": "https://api.starlan.internal/openapi"}],
+  "info": {"title": "{{brand}}开放平台 API", "version": "3.0.0"},
+  "servers": [{"url": "https://api.{{slug}}.internal/openapi"}],
   "components": {
     "securitySchemes": {
       "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
@@ -261,8 +275,8 @@ deploy:
 Server API: Apache/2.4.58 (Unix)
 Loaded Configuration File: /etc/php/7.4/apache2/php.ini
 PHP API: 20190902
-Document Root: /www/wwwroot/starlan/public
-Server Admin: admin@starlan.example
+Document Root: /www/wwwroot/{{slug}}-app/public
+Server Admin: admin@{{slug}}.example
 Registered PHP Streams: php, http, ftp, zlib, phar
 Allow_url_fopen: On
 Allow_url_include: Off
@@ -288,12 +302,12 @@ Timezone: Asia/Shanghai
     {
       "name": "applicationConfig: [classpath:/application-prod.yml]",
       "properties": {
-        "spring.datasource.url": "jdbc:mysql://10.0.12.44:3306/starlan_saas?useSSL=false",
-        "spring.datasource.username": "sl_admin",
-        "spring.datasource.password": "Sl@2023!Adm1n",
+        "spring.datasource.url": "jdbc:mysql://10.0.12.44:3306/{{slug}}_db?useSSL=false",
+        "spring.datasource.username": "sa_admin",
+        "spring.datasource.password": "Sa@2023!Adm1n",
         "spring.redis.host": "10.0.12.51",
         "spring.redis.password": "Rdspass2023",
-        "app.jwt.secret": "starlan-jwt-prod-9f2c1a4d",
+        "app.jwt.secret": "{{slug}}-jwt-prod-9f2c1a4d",
         "app.oss.access-key-id": "LTAI5tFakeAccessKeyExample",
         "app.sms.template-code": "SMS_887120"
       }
@@ -301,8 +315,8 @@ Timezone: Asia/Shanghai
   ]
 }
 """,
-    "nginx_conf": """# /etc/nginx/conf.d/starlan.conf
-upstream starlan_api {
+    "nginx_conf": """# /etc/nginx/conf.d/{{slug}}.conf
+upstream {{slug}}_api {
     server 10.0.12.44:8080 weight=5;
     server 10.0.12.45:8080 backup;
     keepalive 64;
@@ -310,7 +324,7 @@ upstream starlan_api {
 
 server {
     listen 80;
-    server_name starlan.example api.starlan.internal;
+    server_name {{slug}}.example api.{{slug}}.internal;
     index index.php;
 
     location / {
@@ -326,16 +340,16 @@ server {
     location /admin/ {
         allow 10.0.12.0/24;
         deny all;
-        proxy_pass http://starlan_api;
+        proxy_pass http://{{slug}}_api;
     }
 
     location /static/ {
-        alias /www/wwwroot/starlan/public/static/;
+        alias /www/wwwroot/{{slug}}-app/public/static/;
         expires 30d;
     }
 
-    access_log /var/log/nginx/starlan.access.log;
-    error_log  /var/log/nginx/starlan.error.log warn;
+    access_log /var/log/nginx/{{slug}}.access.log;
+    error_log  /var/log/nginx/{{slug}}.error.log warn;
 }
 """,
     "nginx_status": """Active connections: 284
@@ -344,15 +358,15 @@ server accepts handled requests
 Reading: 6 Writing: 278 Waiting: 0
 """,
     # —— 日志泄漏：应用日志里往往直接带出 SQL、内网地址与复用口令 ——
-    "app_log": """[2024-11-21 03:14:52.118] INFO  [pool-1-thread-7] c.s.saas.order.OrderDao - select * from starlan_orders where buyer_phone='13800000000' and status=PAID limit 20
+    "app_log": """[2024-11-21 03:14:52.118] INFO  [pool-1-thread-7] c.s.saas.order.OrderDao - select * from {{slug}}_orders where buyer_phone='13800000000' and status=PAID limit 20
 [2024-11-21 03:14:52.204] INFO  [pool-1-thread-7] c.s.saas.order.OrderDao - total=1024 elapsed=31ms
 [2024-11-21 03:15:01.771] WARN  [http-nio-8080-exec-5] o.s.web.servlet.PageNotFound - No mapping found for GET /api/internal/config
 [2024-11-21 03:15:44.002] ERROR [http-nio-8080-exec-9] c.s.saas.job.ReconcileJob - reconcile failed: Cannot create PoolableConnectionFactory (Connection refused: 10.0.12.51:6379) retry with redis password Rdspass2023
-[2024-11-21 03:16:02.558] INFO  [http-nio-8080-exec-2] c.s.saas.sms.SmsClient - send sms to 13800000000 template=SMS_887120 sign=星澜
+[2024-11-21 03:16:02.558] INFO  [http-nio-8080-exec-2] c.s.saas.sms.SmsClient - send sms to 13800000000 template=SMS_887120 sign={{brand}}
 [2024-11-21 03:17:30.410] ERROR [http-nio-8080-exec-1] c.s.saas.api.UserController - token verify failed: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIiwiaWF0IjoxNzMyMTIzNDU2fQ.FakeSignatureOnlyNotReal
 """,
-    "error_log": """2024/11/21 03:12:44 [error] 1234#0: *1 FastCGI sent in stderr: "PHP message: PHP Warning:  include(/www/wwwroot/starlan/storage/framework/views/cache/8f3a91c2.php): failed to open stream: Permission denied in /www/wwwroot/starlan/app/View.php on line 88"
-2024/11/21 03:12:44 [error] 1234#0: *2 FastCGI sent in stderr: "PHP message: PHP Fatal error:  Uncaught RedisException: Connection refused in /www/wwwroot/starlan/vendor/predis/predis/src/Connection/StreamConnection.php:152
+    "error_log": """2024/11/21 03:12:44 [error] 1234#0: *1 FastCGI sent in stderr: "PHP message: PHP Warning:  include(/www/wwwroot/{{slug}}-app/storage/framework/views/cache/8f3a91c2.php): failed to open stream: Permission denied in /www/wwwroot/{{slug}}-app/app/View.php on line 88"
+2024/11/21 03:12:44 [error] 1234#0: *2 FastCGI sent in stderr: "PHP message: PHP Fatal error:  Uncaught RedisException: Connection refused in /www/wwwroot/{{slug}}-app/vendor/predis/predis/src/Connection/StreamConnection.php:152
 2024/11/21 03:12:45 [warn] 1234#0: *3 upstream server temporarily disabled while connecting to upstream, upstream: "http://10.0.12.44:8080/api/internal/report"
 """,
     # —— 容器编排与配置中心 ——
@@ -365,24 +379,24 @@ data:
   APP_ENV: prod
   LOG_LEVEL: info
   DB_HOST: 10.0.12.44
-  DB_NAME: starlan_saas
-  DB_USER: sl_admin
-  DB_PASSWORD: Sl@2023!Adm1n
+  DB_NAME: {{slug}}_db
+  DB_USER: sa_admin
+  DB_PASSWORD: Sa@2023!Adm1n
   REDIS_HOST: 10.0.12.51
   REDIS_PASSWORD: Rdspass2023
-  OSS_BUCKET: starlan-prod-assets
+  OSS_BUCKET: {{slug}}-prod-assets
   OSS_ACCESS_KEY_ID: LTAI5tFakeAccessKeyExample
   OSS_SECRET_ACCESS_KEY: FakeSecretOnlyNotRealExample
   WECHAT_MCH_ID: 1609983210
   WECHAT_API_KEY: FakeWechatApiKeyExampleOnly
-  JWT_SECRET: starlan-jwt-prod-9f2c1a4d
+  JWT_SECRET: {{slug}}-jwt-prod-9f2c1a4d
 """,
     "source_map": """{
   "version": 3,
   "file": "app.a91f3c.js",
   "sources": ["webpack://saas/./src/config/runtime.js"],
   "sourcesContent": [
-    "export const RUNTIME = {\\n  apiBase: 'https://api.starlan.internal/v2',\\n  appKey: 'AK_9f2c1a4d7b3e5081',\\n  secret: 'starlan-front-secret-4d7b3e5',\\n  ws: 'wss://push.starlan.internal/ws'\\n};"
+    "export const RUNTIME = {\\n  apiBase: 'https://api.{{slug}}.internal/v2',\\n  appKey: 'AK_9f2c1a4d7b3e5081',\\n  secret: '{{slug}}-front-secret-4d7b3e5',\\n  ws: 'wss://push.{{slug}}.internal/ws'\\n};"
   ],
   "mappings": "AAAA,SAASA"
 }
@@ -405,7 +419,7 @@ deploy:x:1000:1000:deploy:/home/deploy:/bin/bash
 """,
     "cmdinj_echo": """uid=1000(deploy) gid=1000(deploy) groups=1000(deploy),27(sudo),100(users)
 Linux prod-web-03 5.15.0-91-generic #101-Ubuntu SMP x86_64 GNU/Linux
-uid=1000(deploy) deploy@starlan.example
+uid=1000(deploy) deploy@{{slug}}.example
 """,
     "ssti_echo": """<!DOCTYPE html><html><body>
 <h2>商品详情</h2>
@@ -428,7 +442,7 @@ type=serialized(java.lang.Runtime); base64 prefix=aced0005
   "debug": true,
   "currentUser": {
     "id": 10231,
-    "email": "admin@starlan.example",
+    "email": "admin@{{slug}}.example",
     "roles": ["ADMIN", "FINANCE"],
     "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMDMyMSIsInJvbGUiOiJBRE1JTiIsImV4cCI6MTczMjEwMDAwMH0.FakeSignatureOnlyNotReal",
     "refreshToken": "rt_9f2c1a4d7b3e5081c6a2b9d4e7f0813"
@@ -437,6 +451,9 @@ type=serialized(java.lang.Runtime); base64 prefix=aced0005
 }
 """,
 }
+
+# 品牌占位符统一解析为当前站点人设品牌（静态蜜点正文）
+STATIC_BODIES = {k: _resolve_brand(v) for k, v in STATIC_BODIES.items()}
 
 # custom 策略允许返回的 MIME（白名单，防止 LLM 伪造响应头造成内容嗅探问题）
 ALLOWED_MEDIA = {
@@ -488,7 +505,7 @@ def load_builtin():
         match = ov.get("match", match)
         respond = ov.get("respond", respond)
         enabled = int(ov.get("enabled", enabled))
-        store.load_trap(tid, name, match, respond, enabled)
+        store.load_trap(tid, name, _resolve_brand(match), _resolve_brand(respond), enabled)
     # 清理「上一版 yaml 里有、当前 yaml 已移除」的出厂陷阱（LLM/人工新增的保留）
     for row in store.list_traps():
         tid = row["id"]
@@ -591,13 +608,77 @@ def _inject_session_marks(html: str, sid: str) -> str:
     return html
 
 
+# ---------------- 凭据解析与校验 ----------------
+_USER_KEYS = ("username", "user", "u", "account", "login", "name", "email", "mail",
+              "phone", "mobile")
+_PASS_KEYS = ("password", "passwd", "pwd", "pass", "p", "secret")
+
+
+def _extract_credentials(body: str, query: str = "") -> tuple[str, str]:
+    """从 JSON / 表单 / 查询串中提取用户名与口令（字段名大小写不敏感）"""
+    data: dict = {}
+    raw = (body or "").strip()
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                data = {str(k).strip().lower(): v for k, v in obj.items()}
+        except Exception:
+            data = {}
+    if not data:
+        data = {k.strip().lower(): v for k, v in parse_qsl(raw, keep_blank_values=True)}
+    if not data:
+        data = {k.strip().lower(): v for k, v in parse_qsl(query or "", keep_blank_values=True)}
+    user = next((str(data[k]).strip() for k in _USER_KEYS
+                 if k in data and str(data[k]).strip()), "")
+    pwd = next((str(data[k]) for k in _PASS_KEYS
+                if k in data and str(data[k]).strip()), "")
+    return user, pwd
+
+
+def _is_weak_credential(user: str, pwd: str) -> bool:
+    """是否命中弱口令库：用户名大小写不敏感，口令精确匹配"""
+    if not user or not pwd:
+        return False
+    u = user.strip().lower()
+    return any(u == wu.strip().lower() and pwd == wp for wu, wp in config.WEAK_CREDENTIALS)
+
+
+def _is_mfa_code(code: dict) -> bool:
+    """验证码格式是否为 6 位数字"""
+    return any(re.fullmatch(r"\d{6}", str(v).strip()) for v in code.values())
+
+
+def _login_failed_page(sid: str) -> str:
+    """凭据错误页：恒定失败文案 + 401，不泄露账号是否存在"""
+    return f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<title>登录 - {config.BRAND}运营后台</title></head><body>
+<h3>{config.BRAND}运营后台</h3>
+<p style="color:#c00">用户名或密码错误，请重试</p>
+<form method="post" action="/admin/login">
+<input name="u" placeholder="用户名"><input name="p" type="password" placeholder="密码">
+<button type="submit">登录</button></form>
+</body></html>"""
+
+
+def _mfa_passed_page(sid: str) -> str:
+    """二次验证通过：引导进入假后台（同时留下跳转痕迹）"""
+    return f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="1;url=/admin/dashboard">
+<title>验证通过 - {config.BRAND}运营后台</title></head><body>
+<h3>验证通过</h3>
+<p>正在进入运营管理后台…</p>
+<p><a href="/admin/dashboard">立即进入</a></p>
+</body></html>"""
+
+
 def _login_success_page(sid: str) -> str:
     url, tid = watermark.canary_url(sid, "admin_session", config.CALLBACK_BASE)
     store.add_token(tid, sid, "admin_session")
     img = f'<img src="{url}" width="1" height="1" style="display:none">'
     return f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
-<title>星澜运营后台</title></head><body>
-<h2>星澜科技 · 运营管理后台</h2><hr>
+<title>{config.BRAND}运营后台</title></head><body>
+<h2>{config.BRAND} · 运营管理后台</h2><hr>
 <ul><li><a href="/admin/users">用户管理（1,024 条）</a></li>
 <li><a href="/admin/orders">订单导出</a></li>
 <li><a href="/admin/db_dump">数据库备份下载</a></li>
@@ -612,7 +693,7 @@ def _mfa_challenge_page(sid: str) -> str:
     store.add_token(tid, sid, "mfa_challenge")
     img = f'<img src="{url}" width="1" height="1" style="display:none">'
     return f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
-<title>安全验证 - 星澜运营后台</title></head><body>
+<title>安全验证 - {config.BRAND}运营后台</title></head><body>
 <h3>安全验证</h3>
 <p>检测到异地登录，请完成短信二次验证（有效期 5 分钟）。</p>
 <form method="post" action="/admin/mfa/verify">
@@ -628,37 +709,38 @@ def _sqli_echo_page(sid: str, query: str = "") -> str:
     import html as _html
     payload = _html.escape((query or "")[:160]) or "&nbsp;"
     rows = "".join(
-        f"<tr><td>{i}</td><td>用户{i}</td><td>user{i}@starlan.example</td>"
+        f"<tr><td>{i}</td><td>用户{i}</td><td>user{i}@{config.BRAND_DOMAIN}</td>"
         f"<td>1390000{i:04d}</td><td>VIP{i}</td><td>2024-1{i}-1{i}</td></tr>"
         for i in range(1, 6))
     return f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
-<title>搜索结果 - 星澜科技</title>
+<title>搜索结果 - {config.BRAND}</title>
 <style>body{{font-family:Consolas,monospace;margin:28px;color:#222}}
 .err{{border:1px solid #d8b4b4;background:#fff6f6;padding:14px;margin:14px 0}}
 table{{border-collapse:collapse;margin-top:10px}}td,th{{border:1px solid #ccc;padding:5px 9px;font-size:13px}}</style>
 </head><body>
 <h3>搜索结果</h3>
 <div class="err"><b>Warning</b>: mysql_fetch_assoc() expects parameter 1 to be resource, boolean given in
-<b>/www/wwwroot/starlan/vendor/starlan/saas/Search/QueryBuilder.php</b> on line <b>147</b><br>
+<b>/www/wwwroot/{config.BRAND_SLUG}-app/vendor/{config.BRAND_SLUG}/core/Search/QueryBuilder.php</b> on line <b>147</b><br>
 <b>SQL</b>: SELECT `u`.`id`,`u`.`nickname`,`u`.`email`,`u`.`phone`,`u`.`level`,`u`.`created_at`
-FROM `starlan_users` `u` WHERE `u`.`nickname` LIKE <b>'%{payload}%'</b> LIMIT 10</div>
+FROM `{config.BRAND_SLUG}_users` `u` WHERE `u`.`nickname` LIKE <b>'%{payload}%'</b> LIMIT 10</div>
 <table><tr><th>id</th><th>昵称</th><th>邮箱</th><th>手机号</th><th>等级</th><th>注册时间</th></tr>{rows}</table>
 </body></html>"""
 
 
 def _backup_dump(sid: str) -> str:
     url, _ = watermark.canary_url(sid, "backup", config.CALLBACK_BASE)
-    lines = ["-- MySQL dump 10.13", "-- Host: 10.0.12.44  Database: starlan_saas",
-             "--", "CREATE DATABASE starlan_saas;", "USE starlan_saas;",
+    lines = ["-- MySQL dump 10.13",
+             f"-- Host: 10.0.12.44  Database: {config.BRAND_SLUG}_db",
+             "--", f"CREATE DATABASE {config.BRAND_SLUG}_db;", f"USE {config.BRAND_SLUG}_db;",
              "CREATE TABLE users (id INT, name VARCHAR(64), email VARCHAR(128));"]
     for i in range(1, 21):
-        lines.append(f"INSERT INTO users VALUES ({i},'用户{i}','user{i}@starlan.example');")
+        lines.append(f"INSERT INTO users VALUES ({i},'用户{i}','user{i}@{config.BRAND_DOMAIN}');")
     lines.append(f"-- backup verified via {url}")
     return "\n".join(lines) + watermark.session_marker(sid)
 
 
-async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> "tuple[str, str]":
-    """返回 (content, media_type)，由 engine 包成 Response"""
+async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> "tuple[str, str, int]":
+    """返回 (content, media_type, status_code)，由 engine 包成 Response"""
     respond_cfg = json.loads(trap_row["respond_json"])
     strategy = respond_cfg.get("strategy")
     store.incr_trap(trap_row["id"])
@@ -684,7 +766,7 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
         content = STATIC_BODIES.get(respond_cfg.get("file", ""), "")
         if respond_cfg.get("inject_canary"):
             content = _with_canary(content, sid, f"trap:{trap_row['id']}")
-        return content, "text/plain"
+        return content, "text/plain", 200
     if strategy == "custom":
         # LLM 或人工自定义正文：MIME 白名单 + 脱敏 + 可选回连埋点
         content = str(respond_cfg.get("body") or "")
@@ -695,21 +777,28 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
             content = _with_canary(content, sid, f"trap:{trap_row['id']}")
         if mtype.startswith("text/html"):
             content = _inject_session_marks(content, sid)
-        return content, mtype
+        return content, mtype, 200
     if strategy == "fake_login":
         from . import engine
-        engine.record_attempt(sid)  # 先计数：第 3 次尝试进 MFA，第 4 次进后台
-        n = engine.login_attempts(sid)
-        if n >= 4:
-            return _inject_session_marks(_login_success_page(sid), sid), "text/html"
-        if n >= 3:
-            return _inject_session_marks(_mfa_challenge_page(sid), sid), "text/html"
-        return ("<html><body><h3>星澜运营后台</h3>"
-                "<p style='color:red'>用户名或密码错误，请重试</p>"
-                "<form method='post'><input name='u'><input name='p' type='password'>"
-                "<button>登录</button></form></body></html>"), "text/html"
+        engine.record_attempt(sid)
+        user, pwd = _extract_credentials(body, query)
+        if not _is_weak_credential(user, pwd):
+            # 错误凭据恒失败并置 401：不区分账号是否存在，也不因尝试次数放行
+            store.add_score(sid, 2, state="CRED_SUBMITTED")
+            return _login_failed_page(sid), "text/html", 401
+        # 命中弱口令：取证 → MFA 二次验证 → 假后台
+        safe = redact_mapping({"username": user, "password": pwd})
+        events.broadcast("trap.credential", trap_row["id"], sid,
+                         f"弱口令命中：{json.dumps(safe, ensure_ascii=False)}",
+                         {"trap": trap_row["id"], "credentials": safe})
+        store.add_score(sid, 10, state="CRED_SUBMITTED")
+        if engine.mfa_passed(sid):
+            return _inject_session_marks(_login_success_page(sid), sid), "text/html", 200
+        engine.mark_mfa_pending(sid)
+        return _inject_session_marks(_mfa_challenge_page(sid), sid), "text/html", 200
     if strategy == "mfa_verify":
         # 二次验证提交：捕获验证码（也是 MFA 绕过尝试的取证点）
+        from . import engine
         fields = dict(parse_qsl(body, keep_blank_values=True))
         code = {k: v for k, v in fields.items()
                 if any(w in k.lower() for w in ("code", "otp", "token", "sms", "verify"))}
@@ -719,13 +808,17 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
                          f"MFA 验证内容捕获：{json.dumps(redact_mapping(code), ensure_ascii=False)}",
                          {"trap": trap_row["id"], "credentials": redact_mapping(code)})
         store.add_score(sid, 10, state="CRED_SUBMITTED")
+        if engine.mfa_pending(sid) and _is_mfa_code(code):
+            # 弱口令已命中 + 验证码格式正确 → 放行到假后台
+            engine.mark_mfa_passed(sid)
+            return _inject_session_marks(_mfa_passed_page(sid), sid), "text/html", 200
         return ("<!DOCTYPE html><html><body><h3>安全验证</h3>"
                 "<p style='color:red'>验证码错误或已过期，请重新获取。</p>"
                 "<form method='post' action='/admin/mfa/verify'>"
                 "<input name='code' maxlength='6'><button>重新提交</button>"
-                "</form></body></html>"), "text/html"
+                "</form></body></html>"), "text/html", 200
     if strategy == "credential_capture":
-        # 接管 AJAX 登录（如 CAS/Vue 表单无原生 <form>）：解析提交体，记录凭据并回 JSON 错误
+        # 接管 AJAX 登录（如 CAS/Vue 表单无原生 <form>）：解析提交体，记录凭据并回 JSON
         fields = dict(parse_qsl(body, keep_blank_values=True))
         cred = {k: v for k, v in fields.items()
                 if any(w in k.lower() for w in ("user", "name", "pass", "mail", "phone",
@@ -738,13 +831,21 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
                  f"凭据捕获：{detail}",
                  {"trap": trap_row["id"], "credentials": safe_cred})
         store.add_score(sid, 8, state="CRED_SUBMITTED")
+        user, pwd = _extract_credentials(body, query)
+        if _is_weak_credential(user, pwd):
+            # 与后台登录共用同一套弱口令库：命中即放行，避免两个登录入口自相矛盾
+            store.add_score(sid, 6, state="CRED_SUBMITTED")
+            return ('{"success":true,"code":0,"data":{"token":'
+                    '"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.FakeTokenOnlyNotReal",'
+                    '"redirect":"/admin/dashboard"}}',
+                    "application/json", 200)
         return ('{"success":false,"error":"用户名或密码错误","code":1001}',
-                "application/json")
+                "application/json", 401)
     if strategy == "sqli_echo":
-        return _inject_session_marks(_sqli_echo_page(sid, query), sid), "text/html"
+        return _inject_session_marks(_sqli_echo_page(sid, query), sid), "text/html", 200
     if strategy == "canary_download":
-        return _backup_dump(sid), "application/octet-stream"
-    return "Not Found", "text/plain"
+        return _backup_dump(sid), "application/octet-stream", 200
+    return "Not Found", "text/plain", 404
 
 
 # --------------------------------------------------------------------------- #

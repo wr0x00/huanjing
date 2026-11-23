@@ -40,6 +40,18 @@ TRAPS_FILE = BASE_DIR / "config" / "traps.yaml"
 CONSOLE_DIR = BASE_DIR / "console" / "static"
 
 PERSONA = os.getenv("HP_PERSONA", "默认仿冒模板")
+# 蜜点正文与动态页统一使用的品牌标识：默认与站点人设同源，
+# 避免出现与站点身份自相矛盾的残留品牌（拟真前提）。
+BRAND = os.getenv("HP_BRAND", PERSONA)
+# 英文标识：库名 / 内部域名 / 部署路径统一用它，保证全套蜜点口径一致
+BRAND_SLUG = os.getenv("HP_BRAND_SLUG", "saas")
+BRAND_DOMAIN = os.getenv("HP_BRAND_DOMAIN", f"{BRAND_SLUG}.example")
+
+# 假登录弱口令库：只有命中列表的凭据才放行（MFA → 后台），
+# 其余一律失败并置 401 —— 避免"任意凭据均可登录"这种一眼假的蜜罐特征。
+WEAK_CREDENTIALS = [
+    ("admin", "987987"),
+]
 
 # ---- 入口端口：靶站（攻击者视角，生产换域名+反代）与管理端分离 ----
 SITE_PORT = int(os.getenv("HP_SITE_PORT", "8888"))

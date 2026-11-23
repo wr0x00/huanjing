@@ -288,9 +288,15 @@ def read_file(site_id: str, rel: str) -> str:
 
 def write_file(site_id: str, rel: str, content: str, dlp: bool = True) -> dict:
     fp = _resolve(site_id, rel)
-    if fp.suffix.lower() in _TEXT_EXTS and dlp:
-        content = growth.dlp_scan(content)
-    if fp.suffix.lower() in (".html", ".htm"):
+    ext = fp.suffix.lower()
+    if ext in _TEXT_EXTS:
+        # 品牌归一：LLM 落盘时可能自带另一套公司名，实例内多套品牌并存等于自曝假站
+        site = next((s for s in store.list_sites() if s["id"] == site_id), None)
+        brand, slug, domain = growth.brand_of_clone((site or {}).get("clone_id") or "")
+        content = growth.normalize_brand(content, brand, slug, domain)
+        if dlp:
+            content = growth.dlp_scan(content)
+    if ext in (".html", ".htm"):
         # LLM 常把 JSON 写成 {&quot;...} 放进 <script>；script 是原始文本区不解码实体，
         # 会导致 JSON.parse 失败、卡片把 {&quot; 当文本显示。写盘前统一还原。
         content = growth.normalize_html(content)

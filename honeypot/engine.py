@@ -22,6 +22,7 @@ def is_asset(path: str) -> bool:
             or p.startswith("/@") or p.startswith("/_mirror/"))
 
 _login_attempts: dict[str, int] = {}  # MVP 内存版；生产换 Redis
+_mfa_state: dict[str, str] = {}  # sid -> pending（待验证）/ passed（已通过）
 
 # WebRTC 真实 IP 静默采集脚本（注入 L2+ 会话的 HTML；仅同源上报，不引外部资源防识破）
 WEBRTC_SNIPPET = (
@@ -41,6 +42,24 @@ def login_attempts(sid: str) -> int:
 
 def record_attempt(sid: str):
     _login_attempts[sid] = _login_attempts.get(sid, 0) + 1
+
+
+def mfa_pending(sid: str) -> bool:
+    """弱口令已命中、等待短信二次验证"""
+    return _mfa_state.get(sid) == "pending"
+
+
+def mfa_passed(sid: str) -> bool:
+    """二次验证已通过，可进入假后台"""
+    return _mfa_state.get(sid) == "passed"
+
+
+def mark_mfa_pending(sid: str):
+    _mfa_state[sid] = "pending"
+
+
+def mark_mfa_passed(sid: str):
+    _mfa_state[sid] = "passed"
 
 
 def norm_path(path: str) -> str:
@@ -81,7 +100,7 @@ SEED_LOGIN = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <input name="password" type="password" placeholder="密码"><br>
 <button>登录</button></form>
 <p style="color:#888">忘记密码请联系管理员</p>
-<!-- test account: admin / admin123 (仅内网) -->
+<!-- test account: admin / 987987 (仅内网) -->
 </body></html>"""
 
 
@@ -268,8 +287,8 @@ async def handle(request, path: str, clone_id: str, site=None) -> Response:
         # 1) 陷阱优先（payload 常被 URL 编码，用解码后的 query+body 匹配）
         trap = traps.match_first(path, method, query, unquote_plus(body), req_headers)
         if trap:
-            content, media = await traps.respond(trap, sid, body, query)
-            return Response(content, media_type=media)
+            content, media, status = await traps.respond(trap, sid, body, query)
+            return Response(content, media_type=media, status_code=status)
 
         # 2) SiteGraph 命中（缓存应答，热路径）
         node = store.get_node(clone_id, norm_path(path))

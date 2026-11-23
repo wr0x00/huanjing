@@ -370,6 +370,15 @@ def _flush_once():
             conn.commit()
 
 
+def flush_pending():
+    """读前刷盘：把队列里的延迟写立刻落库，保证读到的就是最新（含刚发生的攻击）。
+    队列为空时只做一次轻量判断，无额外 IO。"""
+    try:
+        _flush_once()
+    except Exception as e:
+        print(f"[store] 读前刷盘异常: {e}")
+
+
 def _pack_packet_row(r: dict) -> tuple:
     """队列里的原始报文 → 压缩落库行（zlib CPU 开销移出请求路径）"""
     packed = _pack_row(r["req_headers"], r["req_body"], r["resp_headers"], r["resp_body"])
@@ -753,6 +762,7 @@ def set_webrtc_ip(sid, real_ip: str | None = None, internal_ip: str | None = Non
 
 
 def list_sessions(limit=200):
+    flush_pending()
     rows = q("SELECT * FROM sessions ORDER BY last_seen DESC LIMIT ?", (limit,), fetch=True)
     for row in rows:
         cached = _sessions.get(row["id"])
@@ -852,11 +862,13 @@ def list_packets(site_id=None, session_id=None, start=None, end=None,
         params.append(end)
     if only_credential:
         sql += " AND has_cred=1"
+    flush_pending()
     return _unpack_rows(q(sql + tail, tuple(params + [limit]), fetch=True))
 
 
 def packets_after(after_id: int = 0, limit: int = 200):
     """实时日志增量拉取：按 id 正序返回游标之后的轻量数据包（不含正文）"""
+    flush_pending()
     return q("SELECT id,ts,site_id,port,clone_id,session_id,method,path,query,"
              "status,has_cred FROM packets WHERE id>? ORDER BY id ASC LIMIT ?",
              (int(after_id or 0), int(limit)), fetch=True)
@@ -949,6 +961,7 @@ def add_event(etype, clone_id, session_id, summary, detail=None):
 
 
 def list_events(limit=100, etype=None, session_id=None):
+    flush_pending()
     sql, params = "SELECT * FROM events WHERE 1=1", []
     if etype:
         sql += " AND type LIKE ?"

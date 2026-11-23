@@ -336,6 +336,30 @@ def _backend_audit(files: dict[str, str], interfaces: list[dict]) -> list[str]:
     return issues
 
 
+def _static_audit(files: dict[str, str]) -> bool:
+    """Step 4 静态自检（前端）：所有 HTML 产物都必须是完整文档
+
+    LLM 常只吐一个片段（<h1>内部 VIP 数据</h1>），直接对外服务会渲染成裸片段，
+    攻击者一眼看出是拼装页面。这里只做静态判定，补全由 _complete_html 负责。
+    """
+    for rel, content in (files or {}).items():
+        if not str(rel).lower().endswith((".html", ".htm")):
+            continue
+        low = str(content or "").lower()
+        if "<html" not in low and "<!doctype html" not in low:
+            return False
+    return True
+
+
+def _complete_html(rel: str, content: str) -> str:
+    """把 LLM 给的 HTML 片段补全为完整文档（自检不通过时补）"""
+    if _static_audit({rel: content}):
+        return content
+    title = Path(rel).stem or "页面"
+    return ("<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+            f"<title>{title}</title></head><body>{content}</body></html>")
+
+
 def _patch_backend(files: dict[str, str]) -> dict[str, str]:
     """自动修补 LLM 生成代码的常见低级遗漏（无需再花一轮 LLM 修正）"""
     app = files.get("backend/app.py")
@@ -364,12 +388,20 @@ def _deploy(clone_id: str, site_dir: Path, interfaces: list[dict],
             downloaded: list[dict], source_url: str) -> str:
     """Step 5：DLP 扫描落盘文件 + index.html/文本资产入库 SiteGraph 对外服务"""
     fr = site_dir / "frontend"
+    brand, slug, domain = growth.brand_of_clone(clone_id)
     index_html = ""
-    idx_path = fr / "index.html"
+    # 入口页优先级：指挥模型生成的仿冒首页（site_dir/index.html）> 源站抓取内容
+    # （frontend/index.html）。仿冒首页才是蜜罐对外的脸，源站内容只能兜底。
+    llm_idx = site_dir / "index.html"
+    idx_path = llm_idx if llm_idx.exists() else fr / "index.html"
     if idx_path.exists():
         index_html = idx_path.read_text(encoding="utf-8")
-        idx_path.write_text(growth.dlp_scan(index_html), encoding="utf-8")
+        idx_path.write_text(growth.dlp_scan(
+            growth.normalize_brand(index_html, brand, slug, domain)), encoding="utf-8")
         index_html = idx_path.read_text(encoding="utf-8")
+        if idx_path != fr / "index.html":
+            # 同步到前端目录：独立后端与 SiteGraph 对外服务同一张脸
+            (fr / "index.html").write_text(index_html, encoding="utf-8")
 
     # 文本资产做 DLP 扫描；全部已下载资产入库 SiteGraph（二进制原样，运行时可回源自愈）
     for item in downloaded:
@@ -380,7 +412,9 @@ def _deploy(clone_id: str, site_dir: Path, interfaces: list[dict],
         ctype = _TEXT_CTYPE.get(ext, "application/octet-stream")
         data = fp.read_bytes()
         if ext in _TEXT_CTYPE:
-            fp.write_text(growth.dlp_scan(data.decode("utf-8", "replace")), encoding="utf-8")
+            text = growth.normalize_brand(data.decode("utf-8", "replace"),
+                                          brand, slug, domain)
+            fp.write_text(growth.dlp_scan(text), encoding="utf-8")
             data = fp.read_bytes()
         node_path = "/" + item["path"].removesuffix(".html")
         store.add_node(clone_id, node_path, data, "llm-clone",
@@ -551,13 +585,16 @@ async def _run(source_url: str, persona: str, clone_id: str | None = None) -> st
                                  f"后端自检 {len(issues)} 个问题（离线兜底产物），DLP 兜底后部署")
 
             # ---- Step 5：落盘 + 部署 ----
+            brand, slug, domain = growth.brand_of_persona(persona)
             for rel, content in files.items():
                 rel = rel.replace("\\", "/")
                 if ".." in rel:
                     continue
                 fp = site_dir / rel
                 fp.parent.mkdir(parents=True, exist_ok=True)
-                fp.write_text(growth.dlp_scan(content), encoding="utf-8")
+                content = growth.dlp_scan(
+                    growth.normalize_brand(content, brand, slug, domain))
+                fp.write_text(_complete_html(rel, content), encoding="utf-8")
             index_html = _deploy(clone_id, site_dir, interfaces, downloaded, source_url)
             if not index_html:
                 store.set_clone_status(clone_id, "FAILED: 前端 index.html 缺失")
@@ -583,6 +620,7 @@ async def morph(clone_id: str, instruction: str = "") -> dict:
     if not clone:
         return {"error": f"蜜罐 {clone_id} 不存在"}
     digest = store.digest_nodes(clone_id)
+    brand, slug, domain = growth.brand_of_persona(clone.get("persona") or "")
     out, _ = await llm_gateway.chat(
         [{"role": "system", "content":
             "你是蜜罐变形引擎，只输出 ```file:<路径>``` 代码块，路径形如 decoys/xxx.html。"},
@@ -603,7 +641,8 @@ async def morph(clone_id: str, instruction: str = "") -> dict:
         rel = rel.replace("\\", "/")
         if ".." in rel:
             continue
-        content = growth.normalize_html(growth.dlp_scan(content))
+        content = growth.normalize_html(growth.dlp_scan(
+            growth.normalize_brand(content, brand, slug, domain)))
         (base / rel).parent.mkdir(parents=True, exist_ok=True)
         (base / rel).write_text(content, encoding="utf-8")
         path = "/" + rel.removesuffix(".html")
@@ -639,6 +678,7 @@ async def morph_chat(clone_id: str, instruction: str,
     if not clone:
         return {"error": f"蜜罐 {clone_id} 不存在"}
     digest = store.digest_nodes(clone_id)
+    brand, slug, domain = growth.brand_of_persona(clone.get("persona") or "")
     msgs = [{"role": "system", "content": _MORPH_PROMPT}]
     for h in (history or [])[-_MORPH_HIST_MAX:]:
         role = h.get("role")
@@ -662,7 +702,8 @@ async def morph_chat(clone_id: str, instruction: str,
         rel = rel.replace("\\", "/")
         if ".." in rel:
             continue
-        content = growth.normalize_html(growth.dlp_scan(content))
+        content = growth.normalize_html(growth.dlp_scan(
+            growth.normalize_brand(content, brand, slug, domain)))
         (base / rel).parent.mkdir(parents=True, exist_ok=True)
         (base / rel).write_text(content, encoding="utf-8")
         path = "/" + rel.removesuffix(".html")

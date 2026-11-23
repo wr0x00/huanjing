@@ -5,14 +5,102 @@ import re
 
 from . import config, events, llm_gateway, store, watermark
 
-GROW_PROMPT_SYSTEM = (
-    "你是蜜罐站点生长器，为一家虚构公司生成完全虚构的网页片段。"
-    f"公司人设：{config.PERSONA}。"
-    "铁律：1) 只能输出虚构数据与虚构业务内容；2) 禁止输出真实可利用的漏洞代码或真实个人信息；"
-    "3) 页面要看起来真实可信、业务逻辑自洽；4) 只输出 JSON；"
-    "5) HTML 中嵌入 JSON 一律使用原始字符（如 {\"a\": 1}），"
-    "严禁使用 &quot; &amp; 等 HTML 实体；<script type=\"application/json\"> 内必须是纯 JSON。"
+
+def grow_prompt_system(persona: str, brand: str, slug: str, domain: str) -> str:
+    """生长提示词：绑定该站点人设与品牌口径（各克隆站人设不同，不能写死全局默认）"""
+    return (
+        "你是蜜罐站点生长器，为一家虚构公司生成完全虚构的网页片段。"
+        f"公司人设：{persona}。"
+        "铁律：1) 只能输出虚构数据与虚构业务内容；2) 禁止输出真实可利用的漏洞代码或真实个人信息；"
+        "3) 页面要看起来真实可信、业务逻辑自洽；4) 只输出 JSON；"
+        "5) HTML 中嵌入 JSON 一律使用原始字符（如 {\"a\": 1}），"
+        "严禁使用 &quot; &amp; 等 HTML 实体；<script type=\"application/json\"> 内必须是纯 JSON。"
+        f"6) 品牌唯一：公司名/产品名/平台名只能使用「{brand}」，"
+        f"域名只能用 {domain}，技术标识（库名/表名/路径）只能用 {slug}；"
+        "不得出现任何其他公司名、品牌名或真实域名。"
+    )
+
+
+def brand_of_persona(persona: str) -> tuple[str, str, str]:
+    """由站点人设推导品牌三元组（中文名 / 英文标识 / 域名）
+
+    人设形如"星澜科技：一家中型电商 SaaS 公司"，取冒号前的公司名作为品牌中文名。
+    """
+    brand, slug, domain = config.BRAND, config.BRAND_SLUG, config.BRAND_DOMAIN
+    name = str(persona or "").strip().split("：")[0].split(":")[0].strip()
+    if name:
+        brand = name
+    return brand, slug, domain
+
+
+def brand_of_clone(clone_id: str) -> tuple[str, str, str]:
+    """取该克隆站点的人设品牌三元组（中文名 / 英文标识 / 域名）
+
+    各克隆站有各自人设（如"星澜科技：一家中型电商 SaaS 公司"），
+    品牌归一必须收敛到"该站点的人设"，而不是全局默认，否则同一套蜜点会串味。
+    """
+    try:
+        clone = store.get_clone(clone_id) if clone_id else None
+    except Exception:
+        clone = None
+    return brand_of_persona((clone or {}).get("persona") or "")
+
+
+# 残留虚构品牌别名（来自历史生长/克隆数据的实测统计）。
+# 蜜罐最怕自曝身份：页面上同时露出澄屿、栖云、星澜等互不相干的公司名，
+# 攻击者一眼就知道是拼装的假站 —— 落库前统一收敛到站点人设。
+_BRAND_CN_ALIASES = (
+    "星澜", "星桥", "澄屿", "澄序", "澄川", "栖云", "栖川",
+    "岚序", "岚屿", "岚桥", "青岚", "霁川", "昀川", "远屿", "远岚",
+    "澜图", "澜屿", "澜川", "砚洲", "弧川", "云汀", "砺川", "蜂巢",
 )
+_BRAND_EN_ALIASES = (
+    "starlane", "starlan", "orbitcart", "lumengrid", "northstar", "ncc",
+)
+# 别名替换后可能与品牌名叠字（"星澜科技" → "默认仿冒模板科技"），按尾缀收敛
+_BRAND_TAILS = ("科技", "公司", "集团", "股份", "电商云", "云服务")
+# 品牌衍生的商业域名统一用（starlane-commerce.cn → saas.example）
+_DOMAIN_SUFFIX = (r"\.(?:com|cn|net|org|io|co|top|xyz|cc|info|biz|example|"
+                  r"test|local|dev|app)\b")
+
+
+def _replace_en(text: str, alias: str, slug: str) -> str:
+    """英文品牌替换时保留原有大小写风格（STARLAN→SAAS，Starlan→Saas）"""
+    def repl(m: re.Match) -> str:
+        s = m.group(0)
+        if s.isupper():
+            return slug.upper()
+        if s[:1].isupper():
+            return slug.capitalize()
+        return slug
+    return re.sub(re.escape(alias), repl, text, flags=re.I)
+
+
+def normalize_brand(text: str, brand: str | None = None, slug: str | None = None,
+                    domain: str | None = None) -> str:
+    """把文本里的各路虚构品牌收敛到站点人设（中文名 / 英文标识 / 域名统一）"""
+    if not text:
+        return text
+    brand = brand or config.BRAND
+    slug = slug or config.BRAND_SLUG
+    domain = domain or config.BRAND_DOMAIN
+    if not brand:
+        return text
+
+    for alias in _BRAND_CN_ALIASES:
+        if alias in text:
+            text = text.replace(alias, brand)
+    for alias in _BRAND_EN_ALIASES:
+        if alias.lower() in text.lower():
+            text = _replace_en(text, alias, slug)
+    for tail in _BRAND_TAILS:
+        text = text.replace(brand + tail, brand)
+    text = text.replace(brand + brand, brand)
+    if slug and domain:
+        # 品牌衍生的商业域名统一到人设域名（saas-commerce.cn → saas.example）
+        text = re.sub(r"\b" + re.escape(slug) + r"[a-z0-9-]*" + _DOMAIN_SUFFIX,
+                      domain, text, flags=re.I)
+    return text
 
 
 def _wrap(title: str, body: str) -> str:
@@ -57,7 +145,7 @@ def _parse_llm_json(content: str) -> dict | None:
 
 
 _DLP_PATTERNS = [
-    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "contact@starlan.example"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), f"contact@{config.BRAND_DOMAIN}"),
     (re.compile(r"\b1[3-9]\d{9}\b"), "13800000000"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "10.0.0.1"),
 ]
@@ -100,6 +188,8 @@ async def grow(clone_id: str, sid: str, path: str, intent: dict) -> dict | None:
         return None
 
     digest = store.digest_nodes(clone_id)
+    brand, slug, domain = brand_of_clone(clone_id)
+    persona = str((store.get_clone(clone_id) or {}).get("persona") or config.PERSONA)
     user_prompt = (
         f"攻击者正在探测路径：{path}（判定意图：{intent['level']}，工具特征：{intent['tool']}）。\n"
         f"会话行为画像：{json.dumps(intent.get('agent_profile') or {}, ensure_ascii=False)}。\n"
@@ -112,7 +202,7 @@ async def grow(clone_id: str, sid: str, path: str, intent: dict) -> dict | None:
     )
     # reasoning 指挥模型思维链可耗数千 token，max_tokens 必须给足否则正文为空
     content, provider = await llm_gateway.chat(
-        [{"role": "system", "content": GROW_PROMPT_SYSTEM},
+        [{"role": "system", "content": grow_prompt_system(persona, brand, slug, domain)},
          {"role": "user", "content": user_prompt}],
         task="blueprint", json_mode=True, max_tokens=32000, timeout=150)
 
@@ -121,12 +211,15 @@ async def grow(clone_id: str, sid: str, path: str, intent: dict) -> dict | None:
     if not page:
         page = _fallback_page(path)
 
-    html = normalize_html(dlp_scan(page["html"]))
-    store.add_node(clone_id, path, html, generated_by, title=page.get("title", ""),
+    # 品牌归一后再落库：LLM 常自带一个"看起来像真的"公司名，
+    # 多套品牌并存会让攻击者一眼识破是拼装站
+    html = normalize_html(dlp_scan(normalize_brand(page["html"], brand, slug, domain)))
+    title = normalize_brand(str(page.get("title") or ""), brand, slug, domain)
+    store.add_node(clone_id, path, html, generated_by, title=title,
                    born_from=f"session:{sid}")
     store.add_ledger(clone_id, trigger=intent["level"], path=path,
                      generated_by=generated_by, note=f"session:{sid}")
     events.broadcast("growth.node.created", clone_id, sid,
                      f"站点生长：{path}（by {generated_by}）",
                      {"path": path, "generated_by": generated_by})
-    return {"path": path, "title": page.get("title", ""), "content": html}
+    return {"path": path, "title": title, "content": html}

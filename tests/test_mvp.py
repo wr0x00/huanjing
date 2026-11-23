@@ -8,7 +8,7 @@ os.environ["HP_SITE_PORT"] = "8888"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from honeypot import classifier, engine, store, traps, watermark  # noqa: E402
+from honeypot import classifier, config, engine, store, traps, watermark  # noqa: E402
 from honeypot.app_console import app as console_app  # noqa: E402
 from honeypot.app_site import app as site_app  # noqa: E402
 
@@ -89,7 +89,7 @@ def test_classifier():
 def test_site_serves_bound_clone():
     """靶站 8888 已挂载 seed 蜜罐 → 应答其内容"""
     r = site.get("/index")
-    assert r.status_code == 200 and "星澜科技" in r.text
+    assert r.status_code == 200 and config.PERSONA in r.text
 
 
 def test_unbound_port_placeholder():
@@ -170,10 +170,10 @@ def test_commander_clone(monkeypatch):
     llm_out = ('```file:index.html\n<!DOCTYPE html><html><head><style>body{color:#123}'
                'nav a{margin:8px}.card{border:1px solid #eee;padding:16px}</style>'
                '</head><body><nav><a href="/">首页</a><a href="/login">登录</a></nav>'
-               '<h1>星澜科技</h1><div class="card">一站式电商 SaaS 服务平台</div>'
+               '<h1>测试站点</h1><div class="card">一站式电商 SaaS 服务平台</div>'
                '<form action="/admin/login" method="post">'
                '<input name="username"><input name="password" type="password"></form>'
-               '<footer>© 2023 星澜科技</footer></body></html>\n```'
+               '<footer>© 2023 测试站点</footer></body></html>\n```'
                '\n```file:decoys/vip.html\n<h1>内部 VIP 数据</h1>\n```')
     async def fake_chat(messages, **kw):
         return llm_out, "test-provider"
@@ -188,10 +188,10 @@ def test_commander_clone(monkeypatch):
         return FakeResp()
     monkeypatch.setattr(_hx.AsyncClient, "get", fake_get)
 
-    cid = asyncio.run(cloner.run_clone("https://src.example.com/", "星澜科技（测试）"))
+    cid = asyncio.run(cloner.run_clone("https://src.example.com/", "测试站点（测试）"))
     assert store.get_clone(cid)["status"] == "DEPLOYED"
     node = store.get_node(cid, "/index")
-    assert node and "星澜科技" in node["content"] and 'action="/admin/login"' in node["content"]
+    assert node and "测试站点" in node["content"] and 'action="/admin/login"' in node["content"]
     assert (cloner._SITES_DIR / cid / "decoys" / "vip.html").exists()
     # 静态自检函数
     assert cloner._static_audit({"index.html": "<html></html>"})
@@ -217,10 +217,24 @@ def test_provider_mgmt_and_commander():
 
 
 def test_fake_login_flow():
+    """错误凭据恒失败并置 401；只有命中弱口令库才放行 MFA → 假后台"""
     s = {"User-Agent": "Mozilla/5.0 brute-test"}
-    for _ in range(2):
-        assert "错误" in site.post("/admin/login", data={"u": "a", "p": "b"}, headers=s).text
-    assert "运营管理后台" in site.post("/admin/login", data={"u": "a", "p": "b"}, headers=s).text
+    # 错误凭据：恒失败，与尝试次数无关
+    for _ in range(3):
+        r = site.post("/admin/login", data={"u": "a", "p": "b"}, headers=s)
+        assert r.status_code == 401 and "错误" in r.text
+    # 弱口令命中 → 二次验证挑战
+    r2 = site.post("/admin/login", data={"u": "admin", "p": "987987"}, headers=s)
+    assert r2.status_code == 200 and "安全验证" in r2.text
+    # 验证码提交 → 放行
+    r3 = site.post("/admin/mfa/verify", data={"code": "123456"}, headers=s)
+    assert r3.status_code == 200 and "验证通过" in r3.text
+    # 已通过二次验证 → 直接进假后台
+    r4 = site.post("/admin/login", data={"u": "admin", "p": "987987"}, headers=s)
+    assert r4.status_code == 200 and "运营管理后台" in r4.text
+    # 用户名大小写不敏感，口令精确匹配
+    r5 = site.post("/admin/login", data={"u": "ADMIN", "p": "987987"}, headers=s)
+    assert r5.status_code == 200
 
 
 def test_credential_capture(monkeypatch):
@@ -234,12 +248,15 @@ def test_credential_capture(monkeypatch):
     monkeypatch.setattr(events, "broadcast", capture_event)
     s = {"User-Agent": "Mozilla/5.0 cred-test"}
     r = site.post("/cas/login", data={"username": "admin", "password": "P@ssw0rd"}, headers=s)
-    assert r.status_code == 200
+    assert r.status_code == 401
     data = r.json()
     assert data["success"] is False and "错误" in data["error"]
     # JSON 提交体也能捕获（Vue AJAX 常见形态）
     r2 = site.post("/cas/login", json={"username": "root", "password": "123456"}, headers=s)
     assert r2.json()["success"] is False
+    # 与后台登录共用弱口令库：命中即放行
+    r_ok = site.post("/cas/login", data={"username": "admin", "password": "987987"}, headers=s)
+    assert r_ok.status_code == 200 and r_ok.json()["success"] is True
     # 不带 password 的 POST 不应命中凭据陷阱
     r3 = site.post("/cas/other", data={"foo": "bar"}, headers=s)
     assert r3.headers.get("content-type", "").startswith("text/html") or r3.status_code in (200, 404)

@@ -36,6 +36,26 @@ traps:
       strategy: static
       file: agent_audit_status
 
+  # ---------- 环境变量与目录线索（通用入口，须排在 Agent 版 robots.txt 之后） ----------
+  - id: t_env_leak
+    name: 环境变量文件泄漏（DB/云凭据明文）
+    match:
+      path_glob: ["/.env", "/.env.*", "*/.env", "*/.env.*"]
+      method: GET
+    respond:
+      strategy: static
+      file: fake_dotenv
+      inject_canary: true
+
+  - id: t_robots_hint
+    name: robots.txt 目录线索泄漏
+    match:
+      path_glob: ["/robots.txt"]
+      method: GET
+    respond:
+      strategy: static
+      file: robots_hint
+
   # ---------- 源码仓库与开发者环境泄漏 ----------
   - id: t_git_config
     name: Git 仓库配置泄漏（.git/config）
@@ -201,7 +221,7 @@ traps:
     name: 站点打包备份泄漏（源码与配置一起打包）
     match:
       path_glob: ["/backup.zip", "/www.zip", "/site.zip", "/dist.zip", "/web.zip",
-                  "/backup.tar.gz", "/src.zip", "/starlan.zip"]
+                  "/backup.tar.gz", "/src.zip", "/{{slug}}.zip"]
       method: GET
     respond:
       strategy: custom
@@ -210,7 +230,7 @@ traps:
         403 Forbidden
         Nginx/1.22.1
 
-        本资源需登录后下载：https://starlan.example/auth/download?ticket=7f3a91c2
+        本资源需登录后下载：https://{{domain}}/auth/download?ticket=7f3a91c2
         （票据有效期 15 分钟，登录后可下载 2024-11 站点归档包）
 
   # ---------- 令牌与会话线索 ----------
