@@ -14,6 +14,7 @@ import atexit
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -27,6 +28,91 @@ _PY = sys.executable
 _procs: dict[str, subprocess.Popen] = {}
 _scanned: set[str] = set()   # 已做过孤儿扫描的 site_id（进程生命周期内只扫一次，避免拖慢 sync）
 _failcnt: dict[str, int] = {}   # 连续启动失败计数（进程秒死 = 代码坏了，避免 sync 每 2s 无限重启）
+_failstamp: dict[str, tuple] = {}  # 失败时的代码指纹（app.py + 启动器 mtime）：被改 → 熔断自动清零
+_lasterr: dict[str, str] = {}   # 最近一次启动失败原因（控制台可见，避免"已重启"的假象）
+
+# --------------------------------------------------------------------------- #
+# 实例启动器：由框架接管 uvicorn（强制 127.0.0.1 + 端口读 HP_SITE_PORT）
+#   LLM 只负责业务代码，host/端口不再由 app.py 决定 —— 杜绝"绑到 10.0.0.1 起不来"
+# --------------------------------------------------------------------------- #
+_LAUNCHER_SRC = '''import importlib.util
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+app_py = target / "app.py"
+if not app_py.exists() and (target / "backend" / "app.py").exists():
+    target = target / "backend"
+    app_py = target / "app.py"
+os.chdir(target)
+sys.path.insert(0, str(target))
+if not app_py.exists():
+    raise SystemExit("instance backend/app.py not found: %s" % app_py)
+spec = importlib.util.spec_from_file_location("hp_site_app", app_py)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["hp_site_app"] = mod
+spec.loader.exec_module(mod)
+app = getattr(mod, "app", None)
+if app is None:
+    raise SystemExit("app.py does not define an `app` object")
+import uvicorn
+host = os.environ.get("HP_SITE_HOST") or "127.0.0.1"
+port = int(os.environ.get("HP_SITE_PORT") or "8899")
+uvicorn.run(app, host=host, port=port, log_level="info")
+'''
+
+
+def _launcher_path() -> Path:
+    """框架自有的启动器（放在实例目录之外，LLM 改不到）"""
+    d = config.DATA_DIR / "runtime"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "site_launcher.py"
+    try:
+        old = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        old = ""
+    if old != _LAUNCHER_SRC:
+        p.write_text(_LAUNCHER_SRC, encoding="utf-8")
+    return p
+
+
+def _port_listening(port: int, host: str = "127.0.0.1") -> bool:
+    """端口是否真的在监听（进程活着 ≠ 端口可用）"""
+    if not port:
+        return False
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.6):
+            return True
+    except Exception:
+        return False
+
+
+def _port_bindable(port: int, host: str = "127.0.0.1") -> bool:
+    """端口能否被绑定（残留 TIME_WAIT / 旧监听未释放时为 False）"""
+    if not port:
+        return False
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _log_tail(site_id: str, n: int = 300) -> str:
+    try:
+        txt = (instance_dir(site_id) / "backend" / "instance.stdout.log").read_text(
+            errors="replace")
+        return txt.strip()[-n:]
+    except Exception:
+        return ""
 
 
 def _kill_orphans(site_id: str):
@@ -121,40 +207,95 @@ def deploy(site_id: str, port: int, template_id: str, full_reset: bool = False) 
     return {"ok": True, "dir": str(dst)}
 
 
+def _fail_start(site_id: str, msg: str):
+    """记录启动失败：计数 + 错误原因 + 代码指纹（app.py 或启动器被改 → 熔断自动解除）"""
+    _failcnt[site_id] = _failcnt.get(site_id, 0) + 1
+    try:
+        stamp = ((instance_dir(site_id) / "backend" / "app.py").stat().st_mtime,
+                 _launcher_path().stat().st_mtime)
+    except OSError:
+        stamp = (0.0, 0.0)
+    _failstamp[site_id] = stamp
+    _lasterr[site_id] = (msg or "未知错误").strip()[:400]
+    _procs.pop(site_id, None)
+    events.broadcast("instance.crash", site_id, "-",
+                     f"实例启动失败（{_failcnt[site_id]}/3）：{_lasterr[site_id][:200]}")
+
+
+def _code_stamp(site_id: str) -> tuple:
+    """当前代码指纹（app.py + 启动器 mtime）：与失败时指纹不同 → 允许重试"""
+    try:
+        return ((instance_dir(site_id) / "backend" / "app.py").stat().st_mtime,
+                _launcher_path().stat().st_mtime)
+    except OSError:
+        return (0.0, 0.0)
+
+
 def start(site_id: str, port: int) -> int | None:
-    """在实例目录启动独立后端进程（端口经 HP_SITE_PORT 环境变量注入）。
-    连续 3 次秒死（语法错误等）后熔断，不再无限重启；文件被 LLM 修复后重试计数自动清零"""
-    if _failcnt.get(site_id, 0) >= 3:
-        return None
-    stop(site_id, kill_orphan=True)
+    """在实例目录启动独立后端进程。
+    uvicorn 由框架启动器接管：强制 127.0.0.1 + 端口读 HP_SITE_PORT（LLM 写错 host 也不会起不来）。
+    连续 3 次秒死（语法错误等）后熔断；app.py 被 LLM 改动（mtime 变化）后自动清零重试"""
     be = instance_dir(site_id) / "backend"
-    if not (be / "app.py").exists():
+    app_py = be / "app.py"
+    if not app_py.exists():
+        return None
+    if _failcnt.get(site_id, 0) >= 3:
+        if _code_stamp(site_id) != _failstamp.get(site_id):
+            _failcnt.pop(site_id, None)      # 代码/启动器被改过 → 熔断解除，允许再试
+            _failstamp.pop(site_id, None)
+            _lasterr.pop(site_id, None)
+        else:
+            _lasterr[site_id] = "连续 3 次启动失败已熔断；修复 backend/app.py 后自动重试"
+            return None
+    stop(site_id, kill_orphan=True)
+    # 上一代孤儿可能仍占着端口（启动器命令行不再含实例路径，按端口清杀最可靠）
+    if _port_listening(port) or not _port_bindable(port):
+        _kill_port(port, site_id)
+    # 等端口真正可绑定（Windows 上旧监听被杀后仍会短暂占用 → 直接起会 EADDRINUSE）
+    for _ in range(40):
+        if _port_bindable(port):
+            break
+        time.sleep(0.2)
+    if not _port_bindable(port):
+        _lasterr[site_id] = f"端口 {port} 被其他进程占用，无法启动"
+        events.broadcast("instance.crash", site_id, "-",
+                         f"实例启动失败：端口 {port} 被占用（请先释放该端口）")
         return None
     logf = (be / "instance.stdout.log").open("ab")
-    env = {**os.environ, "HP_SITE_PORT": str(port)}
-    p = subprocess.Popen([_PY, "app.py"], cwd=str(be), env=env,
-                         stdout=logf, stderr=subprocess.STDOUT)
+    env = {**os.environ, "HP_SITE_PORT": str(port), "HP_SITE_HOST": "127.0.0.1"}
+    # argv 传实例路径（启动器命令行含路径 → 孤儿可按路径清理）
+    p = subprocess.Popen([_PY, "-u", str(_launcher_path()), str(be)],
+                         cwd=str(be), env=env, stdout=logf, stderr=subprocess.STDOUT)
     _procs[site_id] = p
-    # 1.2s 后体检：仍活着 → 成功；秒死 → 计数并广播（带日志尾部方便定位）
+    # 体检：进程存活 + 端口真正监听才算起来
     def _check():
-        time.sleep(1.2)
+        time.sleep(2.0)
         if p.poll() is not None:
-            _failcnt[site_id] = _failcnt.get(site_id, 0) + 1
-            tail = ""
-            try:
-                tail = (be / "instance.stdout.log").read_text(errors="replace")[-200:]
-            except Exception:
-                pass
-            events.broadcast("instance.crash", site_id, "-",
-                             f"实例进程秒死（{_failcnt[site_id]}/3）: {tail.strip()[:150]}")
-            _procs.pop(site_id, None)
-        else:
-            _failcnt.pop(site_id, None)
+            _fail_start(site_id, f"进程秒死：{_log_tail(site_id)}")
+            return
+        for _ in range(20):
+            if _port_listening(port):
+                _failcnt.pop(site_id, None)
+                _failstamp.pop(site_id, None)
+                _lasterr.pop(site_id, None)
+                events.broadcast("instance.listening", site_id, "-",
+                                 f"实例已就绪：pid={p.pid} 监听 127.0.0.1:{port}")
+                return
+            if p.poll() is not None:
+                _fail_start(site_id, f"进程秒死：{_log_tail(site_id)}")
+                return
+            time.sleep(0.4)
+        try:
+            p.kill()
+        except Exception:
+            pass
+        _procs.pop(site_id, None)
+        _fail_start(site_id, f"进程存活但端口 {port} 未监听：{_log_tail(site_id)}")
     try:
         asyncio.get_running_loop().create_task(asyncio.to_thread(_check))
     except RuntimeError:
         threading.Thread(target=_check, daemon=True).start()
-    events.broadcast("instance.started", site_id, "-", f"实例进程 pid={p.pid} 监听 127.0.0.1:{port}")
+    events.broadcast("instance.started", site_id, "-", f"实例进程已拉起 pid={p.pid}，端口 {port}")
     return p.pid
 
 
@@ -184,6 +325,29 @@ def is_running(site_id: str) -> bool:
 
 def status(site_id: str) -> str:
     return "running" if is_running(site_id) else "stopped"
+
+
+def health(site_id: str, port: int = 0) -> dict:
+    """实例健康态：进程状态 + 端口是否监听 + 最近失败原因"""
+    p = int(port or (_read_meta(site_id) or {}).get("port") or 0)
+    return {"status": status(site_id),
+            "listening": _port_listening(p) if p else False,
+            "error": _lasterr.get(site_id, "")}
+
+
+async def wait_ready(site_id: str, port: int, timeout: float = 15.0) -> dict:
+    """等待实例端口真正监听；返回 {ok, pid, error}（失败时如实给出原因）"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if port and _port_listening(port):
+            proc = _procs.get(site_id)
+            return {"ok": True, "pid": proc.pid if proc else None, "error": ""}
+        if not is_running(site_id):
+            err = _lasterr.get(site_id, "") or _log_tail(site_id) or "实例进程已退出"
+            return {"ok": False, "pid": None, "error": err[:300]}
+        await asyncio.sleep(0.4)
+    return {"ok": False, "pid": None,
+            "error": _lasterr.get(site_id, "") or f"等待端口 {port} 监听超时"}
 
 
 def sync(sites: list[dict]):
@@ -242,10 +406,12 @@ def list_instances() -> list[dict]:
         if not (instance_dir(sid) / "backend" / "app.py").exists():
             continue
         meta = _read_meta(sid) or {}
+        h = health(sid, int(s["port"]))
         out.append({"site_id": sid, "site_name": s["name"], "port": s["port"],
                     "template_id": s["clone_id"],
                     "persona": (clones.get(s["clone_id"]) or {}).get("persona", ""),
-                    "status": status(sid),
+                    "status": h["status"], "listening": h["listening"],
+                    "error": h["error"],
                     "dir": str(instance_dir(sid)),
                     "updated_at": meta.get("updated_at", "")})
     return out
@@ -300,6 +466,10 @@ def write_file(site_id: str, rel: str, content: str, dlp: bool = True) -> dict:
         # LLM 常把 JSON 写成 {&quot;...} 放进 <script>；script 是原始文本区不解码实体，
         # 会导致 JSON.parse 失败、卡片把 {&quot; 当文本显示。写盘前统一还原。
         content = growth.normalize_html(content)
+    if ext == ".py":
+        # LLM 重写 app.py 常把源站 IP 写进 uvicorn host → 本机绑不上、站点秒死；写盘即强制回环
+        from . import cloner
+        content = cloner.force_local_host(content)
     fp.parent.mkdir(parents=True, exist_ok=True)
     fp.write_text(content, encoding="utf-8")
     events.broadcast("instance.file.write", site_id, "-", f"文件写入 {rel}")
@@ -317,6 +487,8 @@ def delete_file(site_id: str, rel: str) -> dict:
 
 def restart(site_id: str, port: int) -> int | None:
     _failcnt.pop(site_id, None)   # 手动/进化重启 = 主动意图，清熔断计数
+    _failstamp.pop(site_id, None)
+    _lasterr.pop(site_id, None)
     return start(site_id, port)
 
 
@@ -362,8 +534,10 @@ _EVOLVE_PROMPT = """你是蜜罐靶站的「自生长引擎」。本项目的核
 
 
 def _posture(site_id: str, limit: int = 40) -> str:
-    """实时攻击者态势：控制台事件流 + 会话画像 + 实例本地 honeypot.log"""
+    """实时攻击者态势：控制台事件流 + 会话画像 + 实例本地 honeypot.log + 实例启动日志"""
     lines = []
+    if _lasterr.get(site_id):
+        lines.append("【最近一次启动失败（请优先修复）】" + _lasterr[site_id][:400])
     try:
         evs = store.list_events(limit=limit)
         for e in evs:
@@ -386,7 +560,14 @@ def _posture(site_id: str, limit: int = 40) -> str:
             lines.append("实例凭据日志：暂无记录")
     except Exception:
         pass
-    return "\n".join(lines[:120]) or "暂无态势数据"
+    try:
+        sp = instance_dir(site_id) / "backend" / "instance.stdout.log"
+        if sp.exists():
+            tail = sp.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-25:]
+            lines.append("实例启动/运行日志（最近25条）:\n" + "\n".join(tail))
+    except Exception:
+        pass
+    return "\n".join(lines[:140]) or "暂无态势数据"
 
 
 def _read_snapshot(site_id: str, max_chars: int = 24000) -> tuple[str, str]:
@@ -508,9 +689,13 @@ async def evolve(site_id: str, port: int, instruction: str = "") -> dict:
         return {"ok": False, "error": f"LLM 未输出可解析操作（{used or '无可用模型'}）"}
     applied, skipped = _apply_ops(site_id, ops)
     pid = restart(site_id, port)
+    r = await wait_ready(site_id, port)
     events.broadcast("instance.evolved", site_id, "-",
-                     f"LLM 态势进化（{used}）：应用 {len(applied)} 个操作，实例已重启")
-    return {"ok": True, "used": used, "applied": applied, "skipped": skipped, "pid": pid}
+                     f"LLM 态势进化（{used}）：应用 {len(applied)} 个操作，" +
+                     (f"实例已重启并监听 127.0.0.1:{port}（pid={pid}）" if r.get("ok")
+                      else f"但重启失败：{r.get('error')}"))
+    return {"ok": True, "used": used, "applied": applied, "skipped": skipped, "pid": pid,
+            "listening": bool(r.get("ok")), "error": r.get("error", "")}
 
 
 # --------------------------------------------------------------------------- #
@@ -538,16 +723,19 @@ _ASSIST_PROMPT = """你是靶站「{name}」（端口 {port}，{state}）的自�
    [{{"op": "write", "path": "frontend/decoy-admin.html", "content": "完整文件内容"}},
     {{"op": "delete", "path": "frontend/old.html"}}]
 3. 纯问答则不输出 <<<OPS>>> 段。
-4. 修改 backend/app.py 时给出完整文件：保持 FastAPI 结构、frontend 静态挂载、凭据写 honeypot.log 行为不变；
-   uvicorn host 固定 127.0.0.1，端口读环境变量 HP_SITE_PORT。
-5. 新页面自包含（CSS/JS 内联）；品牌延续人设，不得出现源站真实域名；最多 6 个操作。
-6. 用户要求增减功能、改页面、改话术时优先动手实现，不要只给建议。
-7. HTML 里嵌入 JSON 一律用原始字符（如 {"a": 1}），严禁出现 &quot; &amp; 等 HTML 实体；
+4. 修改 backend/app.py 时给出完整文件：保持 FastAPI 结构、frontend 静态挂载、凭据写 honeypot.log 行为不变。
+5. 运行方式由框架接管：启动器会 import 你的 app.py 并用 uvicorn 绑定 127.0.0.1:HP_SITE_PORT，
+   你写在 app.py 末尾的 uvicorn.run(...) 不会执行；但仍建议写成 host="127.0.0.1"、端口读 HP_SITE_PORT。
+   app.py 必须暴露名为 app 的 FastAPI 对象，导入期不得抛异常（否则站点起不来）。
+6. 新页面自包含（CSS/JS 内联）；品牌延续人设，不得出现源站真实域名；最多 6 个操作。
+7. 用户要求增减功能、改页面、改话术时优先动手实现，不要只给建议。
+8. HTML 里嵌入 JSON 一律用原始字符（如 {"a": 1}），严禁出现 &quot; &amp; 等 HTML 实体；
    <script type="application/json"> 内必须是纯 JSON，否则浏览器解析失败、卡片会把实体当文本显示。"""
 
 
 async def _assist(site_id: str, port: int, text: str):
-    """后台执行：LLM 回复流式直播（site.llm）；含 <<<OPS>>> 则应用操作并重启"""
+    """后台执行：LLM 回复流式直播（思考 site.think / 正文 site.llm）；
+    含 <<<OPS>>> 则应用操作并重启，重启结果如实播报（成功=端口已监听，失败=给出原因）"""
     from . import llm_gateway
     try:
         meta = _read_meta(site_id) or {}
@@ -563,16 +751,45 @@ async def _assist(site_id: str, port: int, text: str):
             "{persona}", persona or "虚构企业").replace(
             "{files}", files).replace("{contents}", contents).replace(
             "{posture}", _posture(site_id))
+        # 思考流与正文分流；正文出现 <<<OPS>>> 后不再上屏（操作段单独播报）
+        st = {"tail": "", "cut": False, "ans": ""}
+
+        def _on_chunk(t: str, kind: str):
+            if kind == "reasoning":
+                events.publish("site.think", site_id, t)
+                return
+            if st["cut"]:
+                return
+            combo = st["tail"] + t
+            idx = combo.find("<<<OPS>>>")
+            if idx >= 0:
+                keep = combo[:idx]
+                if len(keep) > len(st["tail"]):
+                    events.publish("site.llm", site_id, keep[len(st["tail"]):])
+                    st["ans"] += keep[len(st["tail"]):]
+                st["cut"] = True
+                return
+            events.publish("site.llm", site_id, t)
+            st["ans"] += t
+            st["tail"] = combo[-16:]
+
         out, used = await llm_gateway.chat(
             [{"role": "system", "content": "你是靶站运维助手，按回复规则输出。"},
              {"role": "user", "content": f"用户消息：{text}\n\n站点上下文：\n{prompt}"}],
-            task="answer", max_tokens=24000, timeout=150,
-            on_chunk=lambda t, kind: events.publish("site.llm", site_id, t))
+            task="answer", max_tokens=24000, timeout=150, on_chunk=_on_chunk)
         events.publish_flush("site.llm", site_id)
+        events.publish_flush("site.think", site_id)
         # 原始回复落盘（排障用：可核对 LLM 是否按约定输出 <<<OPS>>>）
         try:
             (instance_dir(site_id) / "backend" / "assist_last.txt").write_text(
                 f"【用户】{text}\n【LLM 原始回复】\n{out}", encoding="utf-8")
+        except Exception:
+            pass
+        # 答复正文单独落库（只入库不推 SSE，避免与实时流重复气泡；刷新后据此回填对话历史）
+        try:
+            answer = (st["ans"] or out.split("<<<OPS>>>")[0]).strip()
+            if answer:
+                store.add_event("site.answer", site_id, "-", answer[:4000])
         except Exception:
             pass
         # 解析操作段
@@ -583,15 +800,35 @@ async def _assist(site_id: str, port: int, text: str):
         if ops:
             applied, skipped = _apply_ops(site_id, ops)
             pid = restart(site_id, port)
-            events.broadcast("site.applied", site_id, "-",
-                             f"已应用 {len(applied)} 个文件操作" +
-                             (f"，跳过 {len(skipped)} 个" if skipped else "") +
-                             f"，站点已重启（pid={pid}）")
+            r = await wait_ready(site_id, port)
+            head = f"已应用 {len(applied)} 个文件操作"
+            if skipped:
+                head += "，跳过 " + "；".join(
+                    f"{s.get('op')} {s.get('path')}（{s.get('why')}）" for s in skipped[:3])
+            if r.get("ok"):
+                events.broadcast("site.applied", site_id, "-",
+                                 f"{head}，站点已重启并监听 127.0.0.1:{port}（pid={pid}）")
+            else:
+                events.broadcast("site.applied", site_id, "-",
+                                 f"{head}，但站点重启失败：{r.get('error')}；"
+                                 f"已把启动日志喂回给你，请据此修复 backend/app.py")
+                # 失败原因回灌给模型，让它能继续修
+                try:
+                    await llm_gateway.chat(
+                        [{"role": "system", "content": "你是靶站运维助手，只输出可执行的修复说明与 JSON 操作数组。"},
+                         {"role": "user", "content":
+                             f"刚才的修改导致站点启动失败，请阅读下面的启动日志并继续修复"
+                             f"（可直接输出 <<<OPS>>> 操作数组）：\n{r.get('error','')}\n\n"
+                             f"当前 backend/app.py 开头：\n"
+                             f"{read_file(site_id, 'backend/app.py')[:4000]}"}],
+                        task="answer", max_tokens=24000, timeout=150)
+                except Exception:
+                    pass
         events.broadcast("site.done", site_id, "-", f"本轮对话完成（{used}）")
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        events.broadcast("site.reply", site_id, "-", f"助手异常：{str(e)[:120]}")
+        events.broadcast("site.reply", site_id, "-", f"助手异常：{str(e)[:160]}")
         events.broadcast("site.done", site_id, "-", "本轮对话结束")
 
 

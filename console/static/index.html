@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>蜜罐指挥中心 · AI Honeypot</title>
-<link rel="stylesheet" href="/static/styles.css?v=10">
+<link rel="stylesheet" href="/static/styles.css?v=11">
 <script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/charts.js?v=2"></script>
 </head>
@@ -356,12 +356,17 @@ const Live = {template:`
               style="cursor:pointer" @click="curSiteCid=cid" :title="chats[cid].sid">{{chats[cid].title||cid}}</span></div></div>
     <div class="card-body" v-if="curSite">
       <div class="row" style="margin-bottom:10px;align-items:center">
-        <span class="tag" :class="curSite.status==='running'?'tag-green':(curSite.status==='engine'?'tag-blue':'tag-orange')">
+        <span class="tag" :class="curSite.status==='running'?'tag-green':(curSite.status==='engine'?'tag-blue':'tag-orange')"
+              :title="curSite.error||'站点状态'">
           {{curSite.sid}} · :{{curSite.port}} ·
-          {{curSite.status==="running"?"运行中":(curSite.status==="engine"?"拟真引擎":"已停止")}}</span>
+          {{curSite.status==="running"?(curSite.listening?"运行中":(curSite.error?"启动失败":"进程存活"))
+            :(curSite.status==="engine"?"拟真引擎":"已停止")}}</span>
         <span class="tag tag-green">自生长助手 · 依据攻击态势生长站点，可增删改查文件并自动重启</span>
         <span class="sp"></span>
         <button class="btn btn-sm" @click="pauseCur('site')">重启站点</button></div>
+      <details class="cc-think" v-if="curSite.think">
+        <summary>模型思考过程（{{curSite.think.length}} 字）</summary>
+        <div class="cc-think-body">{{curSite.think}}</div></details>
       <div class="cc-log" ref="cclogSite">
         <div v-for="(m,i) in curSite.msgs" :key="i" class="cc-msg" :class="'cc-'+m.role">
           <div class="cc-bubble"><span class="cc-caret" v-if="m.role==='assistant' && m.open!==false">▍</span>{{decodeEnt(m.text)}}</div></div>
@@ -416,11 +421,20 @@ const Live = {template:`
       if(!isSite&&!isClone) return;
       const key=isSite?("site:"+d.clone_id):d.clone_id;
       const ct=this.ensure(key, isSite?{kind:"site",sid:d.clone_id}:undefined);
-      if(t.endsWith(".user")){ this.closeOpen(ct); ct.msgs.push({role:"user",text:d.summary}); }
+      if(t.endsWith(".user")){
+        if(ct.echo && ct.echo===d.summary){ ct.echo=""; }   // 本地已回显，避免重复气泡
+        else { this.closeOpen(ct); ct.msgs.push({role:"user",text:d.summary}); }
+      }
+      else if(t.endsWith(".think")){ ct.think=(ct.think||"")+d.summary; }
       else if(t.endsWith(".llm")){
-        const last=ct.msgs[ct.msgs.length-1];
-        if(last&&last.role==="assistant"&&last.open!==false){ last.text+=d.summary; }
-        else ct.msgs.push({role:"assistant",text:d.summary,open:true});
+        let idx=-1;
+        for(let i=ct.msgs.length-1;i>=0;i--){ if(ct.msgs[i].pending){idx=i;break} }
+        if(idx>=0){ const m=ct.msgs[idx]; m.pending=false; m.text=d.summary; m.open=true; }
+        else{
+          const last=ct.msgs[ct.msgs.length-1];
+          if(last&&last.role==="assistant"&&last.open!==false){ last.text+=d.summary; }
+          else ct.msgs.push({role:"assistant",text:d.summary,open:true});
+        }
         this.scrollChat(ct.kind);
       }
       else if(t.endsWith(".reply")){ this.closeOpen(ct); ct.msgs.push({role:"assistant",text:d.summary}); }
@@ -445,9 +459,21 @@ const Live = {template:`
       this[input]="";
       const url=ct.kind==="site" ? `/api/instances/${ct.sid}/command`
                                  : `/api/clones/${ct.sid}/command`;
+      if(ct.kind==="site"){
+        // 立即本地回显 + 占位：推理模型首 token 慢，不回显就像"没反应"
+        ct.echo=t; ct.think="";
+        this.closeOpen(ct);
+        ct.msgs.push({role:"user",text:t});
+        ct.msgs.push({role:"assistant",text:"思考中…",pending:true,open:true});
+        this.scrollChat("site");
+      }
       const r=await api(url,{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t})});
-      if(r.error){window.__toast(r.error,"err");return}
+      if(r.error){
+        window.__toast(r.error,"err");
+        if(ct.kind==="site"){ const last=ct.msgs[ct.msgs.length-1];
+          if(last&&last.pending){ last.pending=false; last.text="请求失败："+r.error; last.open=false; } }
+        return}
       window.__toast(ct.kind==="site"?"自生长助手正在处理，回复实时直播":
         (r.running?"LLM 正在回应，指令将注入下一阶段":"LLM 已回应"),"ok");
     },
@@ -456,7 +482,13 @@ const Live = {template:`
       if(ct.kind==="site"){
         const r=await api(`/api/instances/${ct.sid}/restart`,{method:"POST"});
         if(r.error){window.__toast(r.error,"err");return}
-        window.__toast(`站点已重启 pid=${r.pid||"-"}`,"ok"); return;
+        ct.status=r.status||"stopped"; ct.listening=!!r.listening; ct.error=r.error||"";
+        if(r.ok){ window.__toast(`站点已重启并监听 :${ct.port}（pid=${r.pid||"-"}）`,"ok"); }
+        else{
+          window.__toast("重启失败："+(r.error||"未知原因"),"err");
+          ct.msgs.push({role:"system",text:"重启失败："+(r.error||"未知原因")});
+        }
+        return;
       }
       const r=await api(`/api/clones/${ct.sid}/pause`,{method:"POST"});
       if(r.error){window.__toast(r.error,"err");return}
@@ -473,6 +505,16 @@ const Live = {template:`
           else ct.msgs.push({role:"system",text:`${e.ts||""} ${e.type}: ${e.summary}`});
         });
         if(/DEPLOYED|FAILED/.test(c.status)) ct.running=false;
+      });
+      // 靶站对话历史：刷新后不再空白（site.user / site.answer / site.applied 等落库事件）
+      const insts=await api("/api/instances");
+      (insts||[]).forEach(i=>{
+        const ct=this.ensure("site:"+i.site_id,{kind:"site",sid:i.site_id});
+        evs.filter(e=>e.clone_id===i.site_id && /^(site|instance)\./.test(e.type)).reverse().forEach(e=>{
+          if(e.type==="site.user") ct.msgs.push({role:"user",text:e.summary});
+          else if(e.type==="site.answer") ct.msgs.push({role:"assistant",text:e.summary,open:false});
+          else ct.msgs.push({role:"system",text:`${e.ts||""} ${e.type}: ${e.summary}`});
+        });
       });
     },
     // 靶站管理行：常驻列出全部真实靶站（不依赖 SSE 事件到达才出现）
@@ -491,13 +533,24 @@ const Live = {template:`
         // 实例模式（独立进程）vs 拟真引擎模式（内置 SiteGraph 监听）
         ct.mode=inst?"instance":"engine";
         ct.status=inst?inst.status:"engine";
+        ct.listening=inst?!!inst.listening:false;
+        ct.error=inst?(inst.error||""):"";
       });
       if(!this.curSiteCid){
         const first=this.siteKeys[0]; if(first) this.curSiteCid=first;
       }
+    },
+    // 周期刷新靶站健康态（进程在跑 ≠ 端口在听；失败原因来自后端日志）
+    async refreshSites(){
+      const insts=await api("/api/instances");
+      (insts||[]).forEach(i=>{
+        const ct=this.chats["site:"+i.site_id]; if(!ct) return;
+        ct.status=i.status; ct.listening=!!i.listening; ct.error=i.error||"";
+      });
     }
   },
-  mounted(){ window.__sseTap=d=>this.onSSE(d); this.seedHistory(); this.seedSites(); },
+  mounted(){ window.__sseTap=d=>this.onSSE(d); this.seedHistory(); this.seedSites();
+    this._siteTm=setInterval(()=>this.refreshSites(),8000); },
   activated(){
     const cid=window.__liveFocusCid;
     if(cid){
@@ -510,7 +563,7 @@ const Live = {template:`
     window.__sseTap=d=>this.onSSE(d);
     this.seedSites();
   },
-  unmounted(){ window.__sseTap=null; }
+  unmounted(){ window.__sseTap=null; if(this._siteTm){clearInterval(this._siteTm); this._siteTm=null;} }
 };
 
 const LiveLogs = {template:`

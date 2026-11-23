@@ -419,8 +419,16 @@ async def api_instance_restart(site_id: str):
     site = _get_site(site_id)
     if not site:
         return {"error": "靶站不存在"}
-    pid = instances.restart(site_id, int(site["port"]))
-    return {"ok": True, "pid": pid, "status": instances.status(site_id)}
+    port = int(site["port"])
+    pid = instances.restart(site_id, port)
+    if pid is None:
+        h = instances.health(site_id, port)
+        return {"ok": False, "pid": None, "status": h["status"], "listening": False,
+                "error": h["error"] or "实例未能启动"}
+    r = await instances.wait_ready(site_id, port)
+    h = instances.health(site_id, port)
+    return {"ok": bool(r.get("ok")), "pid": pid, "status": h["status"],
+            "listening": h["listening"], "error": r.get("error", "")}
 
 
 @app.post("/api/instances/{site_id}/evolve")

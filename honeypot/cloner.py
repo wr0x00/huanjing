@@ -360,6 +360,19 @@ def _complete_html(rel: str, content: str) -> str:
             f"<title>{title}</title></head><body>{content}</body></html>")
 
 
+def force_local_host(content: str) -> str:
+    """把代码里的非回环绑定地址统一改写为 127.0.0.1。
+    LLM 常把源站 IP/域名写进 uvicorn host，导致本机绑不上、站点秒死"""
+    if not content:
+        return content
+    content = re.sub(r'(host\s*=\s*["\'])(?!127\.0\.0\.1|0\.0\.0\.0)[\w.]+(["\'])',
+                     r"\g<1>127.0.0.1\g<2>", content)
+    # 变量式兜底：任何带引号的内网 IP 字符串（HOST="10.0.0.1" 等写法）统一改写为 127.0.0.1
+    return re.sub(
+        r'''(["'])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\1''',
+        r"\g<1>127.0.0.1\g<1>", content)
+
+
 def _patch_backend(files: dict[str, str]) -> dict[str, str]:
     """自动修补 LLM 生成代码的常见低级遗漏（无需再花一轮 LLM 修正）"""
     app = files.get("backend/app.py")
@@ -374,13 +387,7 @@ def _patch_backend(files: dict[str, str]) -> dict[str, str]:
             app = app[:fm.end(1)] + "import uvicorn\n" + app[fm.end(1):] if fm else \
                 "import uvicorn\n" + app
         # 绑定地址强制 127.0.0.1：LLM 常把源站 IP/域名写进 host 导致本机无法启动
-        app = re.sub(r'(host\s*=\s*["\'])(?!127\.0\.0\.1|0\.0\.0\.0)[\w.]+(["\'])',
-                     r"\g<1>127.0.0.1\g<2>", app)
-        # 变量式兜底：任何带引号的内网 IP 字符串（HOST="10.0.0.1" 等写法）统一改写为 127.0.0.1
-        app = re.sub(
-            r'''(["'])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\1''',
-            r"\g<1>127.0.0.1\g<1>", app)
-        files["backend/app.py"] = app
+        files["backend/app.py"] = force_local_host(app)
     return files
 
 
