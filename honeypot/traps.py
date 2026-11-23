@@ -545,9 +545,20 @@ def builtin_ids() -> set[str]:
 # ---------------- 匹配 ----------------
 
 def _match_one(match: dict, path: str, method: str, text: str,
-               headers: dict | None = None) -> bool:
-    if method.upper() != str(match.get("method", "GET")).upper():
+               headers: dict | None = None, scope: tuple[str, ...] = ()) -> bool:
+    methods = match.get("method", "GET")
+    methods = methods if isinstance(methods, list) else [methods]
+    if method.upper() not in {str(m).strip().upper() for m in methods}:
         return False
+    # 靶站定向：site 可写站点 ID / 克隆 ID（"*" 表示全靶站生效）
+    rules = match.get("site") or match.get("sites")
+    if rules:
+        rules = rules if isinstance(rules, list) else [rules]
+        rules = {str(r).strip() for r in rules if str(r).strip()}
+        if rules and "*" not in rules:
+            cur = {str(s) for s in (scope or ()) if s}
+            if not (cur & rules):
+                return False
     target = "/" + path.lstrip("/")
     globs = match.get("path_glob", [])
     globs = globs if isinstance(globs, list) else [globs]
@@ -579,12 +590,12 @@ def _match_one(match: dict, path: str, method: str, text: str,
 
 
 def match_first(path: str, method: str, query: str, body: str,
-                headers: dict | None = None) -> dict | None:
+                headers: dict | None = None, scope: tuple[str, ...] = ()) -> dict | None:
     text = f"{query} {body}"
     for row in store.list_traps():
         if not row["enabled"]:
             continue
-        if _match_one(json.loads(row["match_json"]), path, method, text, headers):
+        if _match_one(json.loads(row["match_json"]), path, method, text, headers, scope):
             return row
     return None
 
@@ -636,12 +647,101 @@ def _extract_credentials(body: str, query: str = "") -> tuple[str, str]:
     return user, pwd
 
 
-def _is_weak_credential(user: str, pwd: str) -> bool:
-    """是否命中弱口令库：用户名大小写不敏感，口令精确匹配"""
+# ---------------- 弱口令库（动态可配：LLM / 控制台随时改写） ----------------
+# 出厂引导值只作兜底：一旦 LLM 或控制台写入全局弱口令，就完全以动态库为准，
+# 不再存在"固定口令"。定向弱口令（按靶站/克隆）叠加在全局库之上。
+WEAK_CRED_KEY = "weak_credentials"
+
+
+def _norm_pairs(items) -> list[tuple[str, str]]:
+    """归一化凭据对：[["user","pwd"], ...] 或 [{"username":..,"password":..}, ...]"""
+    out: list[tuple[str, str]] = []
+    for it in items or []:
+        if isinstance(it, dict):
+            u = str(it.get("username") or it.get("user") or "").strip()
+            p = str(it.get("password") or it.get("pwd") or "")
+        elif isinstance(it, (list, tuple)) and len(it) >= 2:
+            u, p = str(it[0]).strip(), str(it[1])
+        else:
+            continue
+        if u and p:
+            out.append((u, p))
+    return out
+
+
+def _cred_pairs(key: str) -> list[tuple[str, str]]:
+    """读取 settings 中的凭据对列表"""
+    raw = store.get_setting(key, "")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    return _norm_pairs(data)
+
+
+def weak_credentials(scope: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """生效的弱口令库：靶站定向 > 全局动态 > 出厂引导
+
+    scope：靶站 ID / 克隆 ID 集合（可多个），定向凭据只对这些目标生效。
+    """
+    pairs = list(_cred_pairs(WEAK_CRED_KEY))
+    if not pairs:
+        pairs = list(config.WEAK_CREDENTIALS)
+    for s in scope or ():
+        if s:
+            pairs.extend(_cred_pairs(f"{WEAK_CRED_KEY}:{s}"))
+    return pairs
+
+
+def set_weak_credentials(pairs, scope: str = "") -> list[list[str]]:
+    """写入弱口令库（scope 空 = 全局；否则只对该靶站/克隆生效）"""
+    norm = [[u, p] for u, p in _norm_pairs(pairs)]
+    key = WEAK_CRED_KEY if not scope else f"{WEAK_CRED_KEY}:{scope}"
+    store.set_setting(key, json.dumps(norm, ensure_ascii=False))
+    return norm
+
+
+def parse_credentials(items) -> list[list[str]] | None:
+    """解析外部传入的凭据列表：任一项非法返回 None（空列表合法 = 清空该作用域）"""
+    if items is None or not isinstance(items, list):
+        return None
+    out: list[list[str]] = []
+    for it in items:
+        pair = _norm_pairs([it])
+        if not pair:
+            return None
+        out.append([pair[0][0], pair[0][1]])
+    return out
+
+
+def weak_credential_state() -> dict:
+    """弱口令库现状（控制台展示用）"""
+    scoped: dict[str, list] = {}
+    for s in store.list_sites():
+        scoped[s["id"]] = [list(p) for p in _cred_pairs(f"{WEAK_CRED_KEY}:{s['id']}")]
+    for c in store.list_clones():
+        scoped.setdefault(c["id"], [list(p) for p in _cred_pairs(f"{WEAK_CRED_KEY}:{c['id']}")])
+    scoped = {k: v for k, v in scoped.items() if v}
+    return {"global": [list(p) for p in _cred_pairs(WEAK_CRED_KEY)],
+            "factory": [list(p) for p in config.WEAK_CREDENTIALS],
+            "scoped": scoped}
+
+
+def _is_weak_credential(user: str, pwd: str, scope: tuple[str, ...] = (),
+                        extra=None) -> bool:
+    """是否命中弱口令库：用户名大小写不敏感，口令精确匹配
+
+    extra：陷阱级专属凭据（LLM 为某个假登录陷阱单独设定的口令）
+    """
     if not user or not pwd:
         return False
     u = user.strip().lower()
-    return any(u == wu.strip().lower() and pwd == wp for wu, wp in config.WEAK_CREDENTIALS)
+    for wu, wp in list(_norm_pairs(extra)) + weak_credentials(scope):
+        if u == str(wu).strip().lower() and pwd == str(wp):
+            return True
+    return False
 
 
 def _is_mfa_code(code: dict) -> bool:
@@ -739,7 +839,8 @@ def _backup_dump(sid: str) -> str:
     return "\n".join(lines) + watermark.session_marker(sid)
 
 
-async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> "tuple[str, str, int]":
+async def respond(trap_row: dict, sid: str, body: str = "", query: str = "",
+                  scope: tuple[str, ...] = ()) -> "tuple[str, str, int]":
     """返回 (content, media_type, status_code)，由 engine 包成 Response"""
     respond_cfg = json.loads(trap_row["respond_json"])
     strategy = respond_cfg.get("strategy")
@@ -782,7 +883,9 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
         from . import engine
         engine.record_attempt(sid)
         user, pwd = _extract_credentials(body, query)
-        if not _is_weak_credential(user, pwd):
+        # 陷阱级专属凭据 + 全局/定向弱口令库
+        extra = respond_cfg.get("weak_credentials")
+        if not _is_weak_credential(user, pwd, scope, extra=extra):
             # 错误凭据恒失败并置 401：不区分账号是否存在，也不因尝试次数放行
             store.add_score(sid, 2, state="CRED_SUBMITTED")
             return _login_failed_page(sid), "text/html", 401
@@ -832,7 +935,8 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
                  {"trap": trap_row["id"], "credentials": safe_cred})
         store.add_score(sid, 8, state="CRED_SUBMITTED")
         user, pwd = _extract_credentials(body, query)
-        if _is_weak_credential(user, pwd):
+        if _is_weak_credential(user, pwd, scope,
+                               extra=respond_cfg.get("weak_credentials")):
             # 与后台登录共用同一套弱口令库：命中即放行，避免两个登录入口自相矛盾
             store.add_score(sid, 6, state="CRED_SUBMITTED")
             return ('{"success":true,"code":0,"data":{"token":'
@@ -853,8 +957,10 @@ async def respond(trap_row: dict, sid: str, body: str = "", query: str = "") -> 
 # --------------------------------------------------------------------------- #
 
 _AUTO_SYSTEM = (
-    "你是企业级蜜罐的陷阱编排引擎，负责根据实时攻击态势自动增删改陷阱。"
+    "你是企业级蜜罐的陷阱编排引擎，负责根据实时攻击态势与在跑的靶站自动设计、增删改陷阱。"
     f"目标公司人设：{config.PERSONA}。"
+    "你有最高设计权限：路径、正文、凭据、媒体类型、命中范围都由你决定，"
+    "只要求「像真站、不含真实敏感信息、能骗住自动化探测」。"
     "铁律："
     "1) 只输出 JSON 操作数组，不要输出解释文字；"
     "2) 所有内容必须完全虚构，禁止出现真实凭据、真实个人信息、真实域名或可直接利用的攻击载荷代码；"
@@ -863,7 +969,12 @@ _AUTO_SYSTEM = (
     "配置与日志泄漏(nginx/ide/ci/k8s)、备份与凭据复用、令牌与密钥线索、云元数据探测等，"
     "禁止写「一眼假的低难度」陷阱（例如直接吐出 .env 全文、robots 明示目录、弱口令一句话放行）；"
     "4) match 条件要精准，只劫持攻击者特征路径，不得劫持正常业务路径；"
-    "5) body 控制在 4000 字符以内，格式与目标内容类型一致。"
+    "5) 强贴合在跑的靶站：优先围绕【靶站上下文】里的站点、克隆人设与真实路由设计陷阱，"
+    "必要时用 match.site / match.sites 把陷阱定向到具体靶站（填站点 ID 或克隆 ID，\"*\" 表示全靶站）；"
+    "6) 你可以自由设定假登录放行的账号口令：用 {\"op\":\"set_credentials\",...} 写全局弱口令库，"
+    "或用 {\"op\":\"set_credentials\",\"scope\":\"<站点ID或克隆ID>\",...} 只给某个靶站；"
+    "也可以在单个陷阱的 respond.weak_credentials 里写该陷阱专属的放行凭据；"
+    "7) body 上限 20000 字符，格式与目标内容类型一致；match.method 可写成数组表示多方法命中。"
 )
 
 _AUTO_USER = """当前态势：
@@ -876,7 +987,8 @@ _AUTO_USER = """当前态势：
 {{"op":"remove","id":"t_robots","reason":"..."}}   // 删除已有陷阱
 {{"op":"disable","id":"t_sqli","reason":"..."}}   // 停用已有陷阱
 {{"op":"enable","id":"t_backup","reason":"..."}}   // 启用已有陷阱
-操作数量控制在 6 个以内，只对确有价值的差异做动作，不要为了凑数改动无关陷阱。"""
+{{"op":"set_credentials","scope":"","credentials":[["admin","Aa123456"]],"reason":"..."}}   // 设定放行的弱口令（scope 填站点ID/克隆ID则只对该靶站生效）
+操作数量控制在 8 个以内，只对确有价值的差异做动作，不要为了凑数改动无关陷阱。"""
 
 
 _mount_cache: dict = {"ts": 0.0, "data": {}}
@@ -900,7 +1012,8 @@ def derive_site_mounts(limit: int = 2500, ttl: float = 15.0) -> dict[str, list[d
         path = str(p.get("path") or "").lstrip("/")
         method = str(p.get("method") or "GET")
         sid = p.get("site_id") or ""
-        row = match_first(path, method, p.get("query") or "", "")
+        row = match_first(path, method, p.get("query") or "", "",
+                          scope=(sid, p.get("clone_id") or ""))
         if not row:
             continue
         info = sites.get(sid) or {}
@@ -914,8 +1027,8 @@ def derive_site_mounts(limit: int = 2500, ttl: float = 15.0) -> dict[str, list[d
     return data
 
 
-def _situation() -> dict:
-    """采集陷阱编排所需的态势：现有陷阱、未命中探测路径、会话画像"""
+def _situation(site_id: str = "") -> dict:
+    """采集陷阱编排所需的态势：现有陷阱、未命中探测路径、会话画像、靶站上下文"""
     cur = []
     for row in store.list_traps():
         try:
@@ -943,7 +1056,24 @@ def _situation() -> dict:
     for s in store.list_sessions(limit=60):
         sessions.append({"sid": s["id"], "score": s.get("score", 0),
                          "state": s.get("state", ""), "tool": s.get("tool", "")})
-    return {"traps": cur, "miss_paths": misses, "sessions": sessions[:20]}
+    # 靶站上下文：让 LLM 针对真实在跑的靶站设计陷阱，而不是凭空想象
+    sites = []
+    for s in store.list_sites():
+        sites.append({"id": s["id"], "name": s.get("name") or "",
+                      "port": s.get("port"), "domain": s.get("domain") or "",
+                      "clone_id": s.get("clone_id") or ""})
+    clones = []
+    for c in store.list_clones():
+        try:
+            routes = store.digest_nodes(c["id"])[:1200]
+        except Exception:
+            routes = ""
+        clones.append({"id": c["id"], "persona": c.get("persona") or "",
+                       "source_url": c.get("source_url") or "",
+                       "status": c.get("status") or "", "routes": routes})
+    return {"traps": cur, "miss_paths": misses, "sessions": sessions[:20],
+            "sites": sites, "clones": clones,
+            "weak_credentials": [list(p) for p in weak_credentials()]}
 
 
 def _parse_ops(text: str) -> list[dict]:
@@ -982,6 +1112,18 @@ def _sanitize(trap: dict) -> tuple[dict | None, str]:
     if not (match.get("path") or match.get("path_glob")
             or match.get("payload_sig") or match.get("payload_any")):
         return None, "match 至少要有 path / path_glob / payload_sig / payload_any 之一"
+    # method 支持多方法
+    methods = match.get("method", "GET")
+    methods = methods if isinstance(methods, list) else [methods]
+    match["method"] = [str(m).strip().upper() for m in methods if str(m).strip()] or ["GET"]
+    # 靶站定向：site / sites 写站点 ID 或克隆 ID（"*" = 全靶站）
+    site_rule = match.get("site") or match.get("sites")
+    if site_rule is not None:
+        rules = site_rule if isinstance(site_rule, list) else [site_rule]
+        rules = [str(r).strip() for r in rules if str(r).strip()]
+        if not rules:
+            return None, "site 不能为空"
+        match["site"] = rules
     resp = trap.get("respond") or {}
     if not isinstance(resp, dict):
         return None, "respond 必须是对象"
@@ -992,14 +1134,22 @@ def _sanitize(trap: dict) -> tuple[dict | None, str]:
         body = str(resp.get("body") or "")
         if not body.strip():
             return None, "custom 策略必须提供 body"
-        if len(body) > 8000:
-            return None, "body 过长（上限 8000 字符）"
+        if len(body) > 20000:
+            return None, "body 过长（上限 20000 字符）"
         resp["body"] = growth.dlp_scan(body)
         mtype = str(resp.get("media_type") or "text/plain").lower().strip()
         resp["media_type"] = mtype if mtype in ALLOWED_MEDIA else "text/plain"
     if strategy == "static":
         if resp.get("file") not in STATIC_BODIES:
             return None, f"静态内容不存在：{resp.get('file')}"
+    if strategy in ("fake_login", "credential_capture"):
+        # 陷阱级专属凭据：LLM 可为该陷阱单独设定任意账号口令
+        wc = resp.get("weak_credentials")
+        if wc is not None:
+            pairs = _norm_pairs(wc)
+            if not pairs:
+                return None, "weak_credentials 必须是 [[用户名,口令],...] 形式"
+            resp["weak_credentials"] = [list(p) for p in pairs]
     out = {"id": tid, "name": growth.dlp_scan(name),
            "match": match, "respond": resp,
            "enabled": int(bool(trap.get("enabled", True)))}
@@ -1058,6 +1208,22 @@ def _apply_ops(ops: list[dict]) -> tuple[list[dict], list[dict]]:
                 ov["enabled"] = enabled
                 overrides[tid] = ov
             applied.append({"op": kind, "id": tid})
+        elif kind in ("set_credentials", "set_weak_credentials", "credentials"):
+            # LLM 自行设定弱口令：可给全局，也可只给某个靶站/克隆
+            creds = op.get("credentials") or op.get("weak_credentials") or []
+            scope = str(op.get("scope") or op.get("site_id")
+                        or op.get("clone_id") or "").strip()
+            pairs = _norm_pairs(creds)
+            if not pairs:
+                skipped.append({"op": kind, "id": op.get("id"),
+                                "why": "credentials 为空或格式非法"})
+                continue
+            set_weak_credentials(pairs, scope)
+            events.broadcast("trap.credentials", "-", "-",
+                             f"弱口令库更新（{scope or '全局'}）：{len(pairs)} 组",
+                             {"scope": scope, "count": len(pairs)})
+            applied.append({"op": "set_credentials", "id": scope or "global",
+                            "count": len(pairs)})
         else:
             skipped.append({"op": kind, "id": op.get("id"), "why": "未知操作类型"})
     state["removed"] = sorted(removed)
@@ -1067,11 +1233,26 @@ def _apply_ops(ops: list[dict]) -> tuple[list[dict], list[dict]]:
     return applied, skipped
 
 
-async def auto_evolve(instruction: str = "") -> dict:
-    """LLM 依据实时攻击态势自动增删改陷阱（带总超时熔断与参数校验）"""
-    sit = _situation()
+async def auto_evolve(instruction: str = "", site_id: str = "") -> dict:
+    """LLM 依据实时攻击态势与在跑的靶站自动设计/增删改陷阱
+
+    site_id：指定重点靶站（站点 ID 或克隆 ID），LLM 会围绕它设计陷阱并可定向绑定。
+    """
+    sit = _situation(site_id)
+    target = ""
+    if site_id:
+        for s in sit.get("sites") or []:
+            if s.get("id") == site_id:
+                target = f"\n\n【重点靶站】{s.get('name') or site_id}（id={site_id}，端口{s.get('port')}，克隆{s.get('clone_id')}）——请优先为它设计陷阱。"
+                break
+        if not target:
+            for c in sit.get("clones") or []:
+                if c.get("id") == site_id:
+                    target = (f"\n\n【重点靶站】克隆 {site_id}（人设：{c.get('persona')}）"
+                              f"——请优先为它设计陷阱。")
+                    break
     user_prompt = _AUTO_USER.format(
-        situation=json.dumps(sit, ensure_ascii=False, indent=1)[:6000],
+        situation=json.dumps(sit, ensure_ascii=False, indent=1)[:9000] + target,
         instruction=instruction.strip() or "（自行研判：优先补齐当前未覆盖的真实高价值攻击面）")
     try:
         out, used = await asyncio.wait_for(llm_gateway.chat(

@@ -963,6 +963,10 @@ const Traps = {template:`
         style="width:100%;box-sizing:border-box;min-height:150px;line-height:1.6"
         placeholder="编排要求（留空 = 由模型自行研判）。例：补齐 CI/CD 与配置中心泄漏面，停用长期零命中的低价值陷阱"></textarea>
       <div class="row" style="margin-top:10px">
+        <select class="input" v-model="autoSite" style="flex:1;min-width:220px">
+          <option value="">全靶站（模型自行选择）</option>
+          <option v-for="s in siteOpts" :key="s.id" :value="s.id">{{s.name}} · {{s.id}}</option>
+        </select>
         <button class="btn btn-primary" @click="autoEvolve" :disabled="autoing">{{autoing?"编排中…":"立即编排"}}</button>
         <button class="btn" @click="autoInstruct=''">清空要求</button>
         <span class="hint">编排调用大模型，通常需 20~90 秒</span></div>
@@ -1019,6 +1023,32 @@ const Traps = {template:`
   </div>
 
   <div class="card">
+    <div class="card-head"><h2 class="card-title">弱口令库</h2>
+      <span class="card-note">假登录只放行库内凭据；LLM 编排可随时改写，不写死</span></div>
+    <div class="card-body">
+      <div class="row">
+        <span class="tag tag-green" v-for="c in credState.global" :key="c[0]">{{c[0]}} / {{c[1]}}</span>
+        <span class="hint" v-if="!credState.global.length">未设置（当前回落到出厂引导值）</span>
+      </div>
+      <div class="row" style="margin-top:8px" v-if="credState.factory.length">
+        <span class="hint">出厂引导：{{credState.factory.map(c=>c[0]+" / "+c[1]).join("、")}}（全局库非空时自动失效）</span>
+      </div>
+      <div class="row" style="margin-top:8px" v-if="Object.keys(credState.scoped||{}).length">
+        <span class="tag tag-purple" v-for="(v,k) in credState.scoped" :key="k">{{k}}：{{v.map(c=>c[0]+"/"+c[1]).join("、")}}</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input class="input" v-model="credInput" style="flex:1;min-width:260px" placeholder="账号/口令，如 admin,Aa123456（多组用 | 分隔）">
+        <select class="input" v-model="credScope" style="min-width:200px">
+          <option value="">全局</option>
+          <option v-for="s in siteOpts" :key="s.id" :value="s.id">仅 {{s.name}}</option>
+        </select>
+        <button class="btn btn-primary" @click="saveCreds">写入</button>
+      </div>
+      <p class="hint" style="margin-top:6px">{{credMsg}}</p>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>名称</th><th>命中条件</th><th>策略</th><th>挂载站点</th><th>命中次数</th><th>启用</th><th class="ops">操作</th></tr></thead><tbody>
     <tr v-for="t in list" :key="t.id">
       <td><span class="tag tag-blue">{{t.id}}</span></td><td>{{t.name}}</td>
@@ -1047,11 +1077,14 @@ const Traps = {template:`
 </div>`,
   data(){return{list:[],d:{path:"",method:"GET",payload:""},dryOut:"",drying:false,
     autoing:false,autoInstruct:"",autoLog:[],showAdd:false,adding:false,addMsg:"",addErr:false,tpls:[],
+    autoSite:"",siteOpts:[],credState:{global:[],factory:[],scoped:{}},credInput:"",credScope:"",credMsg:"",
     nf:{id:"",name:"",method:"GET",pathGlob:"",payloadAny:"",strategy:"custom",media:"text/plain",file:"",body:""}}},
   methods:{
     async refresh(){this.list=(await api("/api/traps")).map(t=>({...t,
       match:JSON.stringify(JSON.parse(t.match_json)),
-      strategy:JSON.parse(t.respond_json).strategy}))},
+      strategy:JSON.parse(t.respond_json).strategy}));
+      try{this.siteOpts=await api("/api/sites")}catch(e){this.siteOpts=[]}
+      try{this.credState=await api("/api/weak-credentials")}catch(e){}},
     async toggle(t){await api("/api/traps/"+t.id,{method:"PUT",
       headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!t.enabled})});
       window.__toast(t.enabled?`陷阱 ${t.id} 已停用`:`陷阱 ${t.id} 已启用`, "ok");
@@ -1066,14 +1099,14 @@ const Traps = {template:`
       this.autoing=true; this.autoLog=[];
       const r=await api("/api/traps/auto",{method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({instruction:this.autoInstruct||""})});
+        body:JSON.stringify({instruction:this.autoInstruct||"",site_id:this.autoSite||""})});
       this.autoing=false;
       if(r.error||!r.ok){
         this.autoLog=[{ok:false,text:"编排失败："+(r.error||"未知错误")}];
         window.__toast("LLM 编排失败","err"); return;}
       const used=r.used?`（模型 ${r.used}）`:"";
       (r.applied||[]).forEach(a=>{
-        const verb={add:"新增",update:"覆盖",create:"新增",remove:"删除",disable:"停用",enable:"启用"}[a.op]||a.op;
+        const verb={add:"新增",update:"覆盖",create:"新增",remove:"删除",disable:"停用",enable:"启用",set_credentials:"设定弱口令"}[a.op]||a.op;
         this.autoLog.push({ok:true,text:`${verb} ${a.id}${a.name?" · "+a.name:""}${a.builtin?"（出厂陷阱已同步覆盖表）":""}`});});
       (r.skipped||[]).forEach(a=>{this.autoLog.push({ok:false,text:`跳过 ${a.id||"?"}：${a.why||"参数不合法"}`});});
       if(!this.autoLog.length) this.autoLog=[{ok:true,text:"模型未提出任何改动"}];
@@ -1106,7 +1139,17 @@ const Traps = {template:`
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({path:this.d.path,method:this.d.method,payload:this.d.payload})});
       this.drying=false;this.dryOut=JSON.stringify(r)},
-    async loadTpls(){try{this.tpls=await api("/api/traps/templates")}catch(e){this.tpls=[]}}
+    async loadTpls(){try{this.tpls=await api("/api/traps/templates")}catch(e){this.tpls=[]}},
+    async saveCreds(){
+      const pairs=this.credInput.split("|").map(s=>s.trim()).filter(Boolean)
+        .map(s=>s.split(",").map(x=>x.trim())).filter(p=>p.length>=2&&p[0]&&p[1]);
+      if(!pairs.length){this.credMsg="格式非法：账号/口令，如 admin,Aa123456";return}
+      const r=await api("/api/weak-credentials",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({credentials:pairs,scope:this.credScope||""})});
+      if(r.error){this.credMsg="写入失败："+r.error;return}
+      this.credMsg=`已写入 ${r.credentials.length} 组（${r.scope||"全局"}）`;
+      this.credInput=""; window.__toast(this.credMsg,"ok"); this.refresh();}
   },
   mounted(){this.refresh(); this.loadTpls()},
   activated(){this.refresh()}

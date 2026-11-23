@@ -1,4 +1,6 @@
 """MVP 冒烟测试：双入口（靶站 8888 / 管理端 9000）+ 靶站挂载绑定（离线，无需任何 LLM Key）"""
+import asyncio
+import json
 import os
 import tempfile
 
@@ -263,6 +265,83 @@ def test_credential_capture(monkeypatch):
     credential_events = [e for e in emitted if e[0] == "trap.credential"]
     assert credential_events and all("P@ssw0rd" not in e[1] for e in credential_events)
     assert all("[REDACTED]" in e[1] for e in credential_events)
+
+
+def test_weak_credentials_dynamic():
+    """弱口令库动态化：写入后立即生效，出厂引导值自动失效；可清空回落"""
+    s = {"User-Agent": "Mozilla/5.0 weak-dyn"}
+    # 出厂引导值初始生效
+    assert site.post("/admin/login", data={"u": "admin", "p": "987987"},
+                     headers=s).status_code == 200
+    # LLM / 控制台写入全局弱口令 → 出厂值失效
+    r = console.post("/api/weak-credentials",
+                     json={"credentials": [["ops", "Ops!2026"]]}).json()
+    assert r["ok"] and r["credentials"] == [["ops", "Ops!2026"]]
+    bad = site.post("/admin/login", data={"u": "admin", "p": "987987"}, headers=s)
+    assert bad.status_code == 401 and "错误" in bad.text
+    ok = site.post("/admin/login", data={"u": "ops", "p": "Ops!2026"}, headers=s)
+    assert ok.status_code == 200 and "安全验证" in ok.text
+    # 控制台可读回当前库
+    st = console.get("/api/weak-credentials").json()
+    assert ["ops", "Ops!2026"] in st["global"]
+    # 非法格式被拒
+    assert console.post("/api/weak-credentials",
+                        json={"credentials": ["ops"]}).json()["ok"] is False
+    # 清空 → 回落到出厂引导值
+    console.post("/api/weak-credentials", json={"credentials": []})
+    assert site.post("/admin/login", data={"u": "admin", "p": "987987"},
+                     headers=s).status_code == 200
+
+
+def test_llm_can_set_credentials_and_target_site(monkeypatch):
+    """LLM 编排：可自行设定弱口令，也可把陷阱定向到具体靶站"""
+    ops = [{"op": "set_credentials", "scope": "",
+            "credentials": [["root", "Root#2026"]], "reason": "设定放行凭据"},
+           {"op": "add",
+            "trap": {"id": "t_site_scoped", "name": "定向靶站配置泄漏",
+                     "match": {"path_glob": ["/internal/deploy.yaml"],
+                               "method": "GET", "site": ["seed"]},
+                     "respond": {"strategy": "custom",
+                                 "body": "db: password: fake-secret", "media_type": "text/plain"}},
+            "reason": "只对 seed 靶站生效"}]
+
+    async def fake_chat(messages, **kw):
+        return json.dumps(ops), "fake-model"
+
+    monkeypatch.setattr(traps.llm_gateway, "chat", fake_chat)
+    res = asyncio.run(traps.auto_evolve("生成陷阱"))
+    assert res["ok"], res
+    # 弱口令库已被 LLM 改写
+    assert ("root", "Root#2026") in traps.weak_credentials()
+    # 定向陷阱已入库
+    row = next(t for t in store.list_traps() if t["id"] == "t_site_scoped")
+    assert "seed" in json.loads(row["match_json"])["site"]
+    # 只对定向靶站命中，其它靶站不命中
+    hit = traps.match_first("/internal/deploy.yaml", "GET", "", "",
+                            scope=("seed",))
+    assert hit and hit["id"] == "t_site_scoped"
+    assert traps.match_first("/internal/deploy.yaml", "GET", "", "",
+                             scope=("other-site",)) is None
+    # 还原
+    traps.set_weak_credentials([], "")
+    store.delete_trap("t_site_scoped")
+
+
+def test_trap_level_weak_credentials():
+    """陷阱级专属凭据：LLM 可为单个假登录陷阱单独设定账号口令"""
+    store.load_trap("t_own_cred", "专属凭据假登录",
+                    {"path": "/ops/console", "method": "POST"},
+                    {"strategy": "fake_login",
+                     "weak_credentials": [["sre", "Sre@2026"]]})
+    try:
+        r = site.post("/ops/console", data={"u": "sre", "p": "Sre@2026"},
+                      headers={"User-Agent": "Mozilla/5.0 own-cred"})
+        assert r.status_code == 200 and "安全验证" in r.text
+        r2 = site.post("/ops/console", data={"u": "nobody", "p": "wrongpass"},
+                       headers={"User-Agent": "Mozilla/5.0 own-cred"})
+        assert r2.status_code == 401
+    finally:
+        store.delete_trap("t_own_cred")
 
 
 def test_console_site_mgmt():

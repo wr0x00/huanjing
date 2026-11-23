@@ -569,12 +569,55 @@ async def api_delete_trap(tid: str):
 
 @app.post("/api/traps/auto")
 async def api_traps_auto(request: Request):
-    """LLM 依据实时攻击态势自动增删改陷阱"""
+    """LLM 依据实时攻击态势与目标靶站自动设计/增删改陷阱
+
+    body: {instruction, site_id}——site_id 指定重点靶站，LLM 会围绕它设计并可定向绑定。
+    """
     from . import traps as traps_mod
-    body = await request.json()
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw else {}
+    except Exception:
+        return {"ok": False, "error": "请求体不是合法 JSON"}
     instruction = str(body.get("instruction") or "")
-    res = await traps_mod.auto_evolve(instruction)
+    site_id = str(body.get("site_id") or "").strip()
+    res = await traps_mod.auto_evolve(instruction, site_id)
     return res
+
+
+@app.get("/api/weak-credentials")
+async def api_weak_credentials_get():
+    """当前弱口令库现状（全局 / 靶站定向 / 出厂兜底）"""
+    from . import traps as traps_mod
+    return traps_mod.weak_credential_state()
+
+
+@app.post("/api/weak-credentials")
+async def api_weak_credentials_set(request: Request):
+    """设置弱口令库：{credentials:[[u,p],...], scope:"站点ID或克隆ID（空=全局）"}"""
+    from . import traps as traps_mod
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw else {}
+    except Exception:
+        return {"ok": False, "error": "请求体不是合法 JSON"}
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "请求体应为 JSON 对象"}
+    if "credentials" not in body and "weak_credentials" not in body:
+        return {"ok": False, "error": "缺少 credentials 字段"}
+    creds = body.get("credentials")
+    if creds is None:
+        creds = body.get("weak_credentials")
+    scope = str(body.get("scope") or "").strip()
+    pairs = traps_mod.parse_credentials(creds)
+    if pairs is None:
+        return {"ok": False, "error": "credentials 格式非法（应为 [[用户名,口令],...]）"}
+    traps_mod.set_weak_credentials(pairs, scope)
+    events.broadcast("trap.credentials", "-", "-",
+                     f"弱口令库更新（{scope or '全局'}）：{len(pairs)} 组",
+                     {"scope": scope, "count": len(pairs)})
+    return {"ok": True, "scope": scope, "credentials": pairs,
+            "state": traps_mod.weak_credential_state()}
 
 
 @app.post("/api/traps/{tid}/dryrun")

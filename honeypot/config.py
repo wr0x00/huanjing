@@ -47,8 +47,10 @@ BRAND = os.getenv("HP_BRAND", PERSONA)
 BRAND_SLUG = os.getenv("HP_BRAND_SLUG", "saas")
 BRAND_DOMAIN = os.getenv("HP_BRAND_DOMAIN", f"{BRAND_SLUG}.example")
 
-# 假登录弱口令库：只有命中列表的凭据才放行（MFA → 后台），
+# 假登录弱口令库的「出厂引导值」：只有命中弱口令库的凭据才放行（MFA → 后台），
 # 其余一律失败并置 401 —— 避免"任意凭据均可登录"这种一眼假的蜜罐特征。
+# 这里只是兜底：LLM 编排（set_credentials）或控制台写入全局弱口令后，
+# 本值自动失效，口令不再固定。见 traps.weak_credentials()。
 WEAK_CREDENTIALS = [
     ("admin", "987987"),
 ]

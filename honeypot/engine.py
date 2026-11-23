@@ -92,7 +92,20 @@ nav a{{margin-right:16px}}header{{border-bottom:2px solid #2456c4;padding-bottom
 <!-- 老后台迁移遗留入口: /admin_old/ -->
 </body></html>"""
 
-SEED_LOGIN = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+
+def seed_login_html() -> str:
+    """登录页模板：测试账号提示随当前弱口令库动态生成
+
+    弱口令库可由 LLM 随时改写（不写死），页面提示必须跟随当前库，
+    否则会给攻击者一条失效的凭据线索。
+    """
+    creds = traps.weak_credentials()
+    if creds:
+        u, p = creds[0]
+        hint = f"<!-- test account: {u} / {p} (仅内网) -->"
+    else:
+        hint = "<!-- 客服测试账号见运维工单 SYS-0001（仅内网） -->"
+    return f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <title>登录 - {config.PERSONA}</title></head><body>
 <h2>客户登录</h2>
 <form method="post" action="/admin/login">
@@ -100,14 +113,14 @@ SEED_LOGIN = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <input name="password" type="password" placeholder="密码"><br>
 <button>登录</button></form>
 <p style="color:#888">忘记密码请联系管理员</p>
-<!-- test account: admin / 987987 (仅内网) -->
+{hint}
 </body></html>"""
 
 
 def seed_site():
     store.add_clone("seed", "internal://seed", config.PERSONA, "DEPLOYED")
     store.add_node("seed", "/index", SEED_INDEX, "seed", title="首页")
-    store.add_node("seed", "/login", SEED_LOGIN, "seed", title="登录")
+    store.add_node("seed", "/login", seed_login_html(), "seed", title="登录")
 
 
 def sync_seed():
@@ -117,7 +130,7 @@ def sync_seed():
         return
     store.add_clone("seed", "internal://seed", config.PERSONA, seed.get("status") or "DEPLOYED")
     store.add_node("seed", "/index", SEED_INDEX, "seed", title="首页")
-    store.add_node("seed", "/login", SEED_LOGIN, "seed", title="登录")
+    store.add_node("seed", "/login", seed_login_html(), "seed", title="登录")
 
 
 def init_runtime():
@@ -129,6 +142,11 @@ def init_runtime():
         seed_site()
     else:
         sync_seed()
+    # 弱口令库可被 LLM 改写：登录页的测试账号提示始终跟随当前库
+    try:
+        store.add_node("seed", "/login", seed_login_html(), "seed", title="登录")
+    except Exception:
+        pass
     if not store.list_sites():
         # 首次启动：默认靶站（独立入口端口）挂载种子蜜罐
         store.add_site("默认靶站", config.SITE_PORT, "seed", domain="")
@@ -284,10 +302,14 @@ async def handle(request, path: str, clone_id: str, site=None) -> Response:
                          f"扫描器请求 {method} /{path}（{intent['tool']}）")
 
     async def route() -> Response:
+        # 靶站上下文：陷阱可按 site/clone 定向，弱口令库也可按靶站区分
+        scope = tuple(x for x in ((site or {}).get("id", ""), clone_id) if x)
         # 1) 陷阱优先（payload 常被 URL 编码，用解码后的 query+body 匹配）
-        trap = traps.match_first(path, method, query, unquote_plus(body), req_headers)
+        trap = traps.match_first(path, method, query, unquote_plus(body),
+                                 req_headers, scope=scope)
         if trap:
-            content, media, status = await traps.respond(trap, sid, body, query)
+            content, media, status = await traps.respond(trap, sid, body, query,
+                                                         scope=scope)
             return Response(content, media_type=media, status_code=status)
 
         # 2) SiteGraph 命中（缓存应答，热路径）
