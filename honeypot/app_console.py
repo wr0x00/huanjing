@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import agentdetect, cloner, clone_runner, config, engine, events, instances, livelog, llm_chat, llm_gateway, store
+from . import agentdetect, cloner, clone_runner, config, engine, events, instances, livelog, llm_chat, llm_gateway, store, urlguard
 from .common_routes import router as common_router
 
 app = FastAPI(title="AI Honeypot Console", docs_url=None, redoc_url=None)
@@ -86,6 +86,11 @@ async def api_create_clone(request: Request):
     source_url, persona = body.get("source_url", ""), body.get("persona") or config.PERSONA
     if not source_url.startswith(("http://", "https://")):
         return {"error": "source_url 必须以 http(s):// 开头"}
+    # SSRF 前置校验：拒绝指向内网/回环/元数据/保留地址的源站
+    try:
+        await asyncio.to_thread(urlguard.check_url, source_url)
+    except urlguard.UrlNotAllowed as e:
+        return {"error": f"源站被安全策略拒绝：{e}"}
     clone_id = await clone_runner.start(source_url, persona)
     return {"ok": True, "clone_id": clone_id, "note": "任务已后台启动，监控窗口实时可见 LLM 产出"}
 

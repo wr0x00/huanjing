@@ -22,7 +22,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from . import config, events, growth, llm_gateway, store
+from . import config, events, growth, llm_gateway, store, urlguard
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -79,6 +79,7 @@ def _parse_files(llm_out: str) -> dict[str, str]:
 async def _download_frontend(client: httpx.AsyncClient, base_url: str,
                              site_dir: Path) -> tuple[str, list[dict]]:
     """下载 index.html + 同源静态资产到 frontend/，返回（重写引用后的 HTML, 资产清单）"""
+    await asyncio.to_thread(urlguard.check_url, base_url)   # 源站必须是公网资产（SSRF 防护）
     r = await client.get(base_url)
     r.raise_for_status()
     html = r.text
@@ -494,8 +495,10 @@ async def _run(source_url: str, persona: str, clone_id: str | None = None) -> st
     store.add_clone(clone_id, source_url, persona, "DOWNLOADING")
     events.broadcast("clone.progress", clone_id, "-", f"开始克隆 {source_url} → sites/{clone_id}/")
     try:
+        await asyncio.to_thread(urlguard.check_url, source_url)   # SSRF 防护：源站必须是公网资产
         async with httpx.AsyncClient(follow_redirects=True, timeout=20,
-                                     headers={"User-Agent": UA}) as client:
+                                     headers={"User-Agent": UA},
+                                     event_hooks={"request": [urlguard.guard_hook()]}) as client:
             # ---- Step 1：真实下载前端 ----
             html, downloaded = await _download_frontend(client, source_url, site_dir)
             store.set_clone_status(clone_id, "ANALYZING")

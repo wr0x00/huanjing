@@ -1,5 +1,6 @@
 """拟真引擎：蜜罐核心请求处理管线（陷阱优先 → SiteGraph 缓存 → 生长 → 泛化 404）
 handle(request, path, clone_id) —— clone_id 由靶站入口按站点绑定解析后传入"""
+import asyncio
 import hashlib
 import json
 import os.path
@@ -8,7 +9,7 @@ from urllib.parse import unquote_plus
 import httpx
 from starlette.responses import Response
 
-from . import agentdetect, classifier, config, events, growth, llm_gateway, store, traps, watermark
+from . import agentdetect, classifier, config, events, growth, llm_gateway, store, traps, urlguard, watermark
 from .redaction import redact_headers, redact_payload, redact_query
 
 # 静态资源扩展名：这类路径不参与生长（防止把 JS/CSS "长"成 HTML 导致页面黑屏）
@@ -198,7 +199,8 @@ def _origin_client() -> httpx.AsyncClient:
     global _http
     if _http is None or _http.is_closed:
         _http = httpx.AsyncClient(follow_redirects=True, timeout=15,
-                                  headers={"User-Agent": _PROXY_UA})
+                                  headers={"User-Agent": _PROXY_UA},
+                                  event_hooks={"request": [urlguard.guard_hook()]})
     return _http
 
 
@@ -214,6 +216,7 @@ async def _proxy_asset(clone_id: str, path: str) -> Response:
         src = node.get("born_from") or ""
         if src.startswith(("http://", "https://")) and node.get("generated_by") == "mirror_placeholder":
             try:
+                await asyncio.to_thread(urlguard.check_url, src)   # 回源同样受 SSRF 策略约束
                 client = _origin_client()
                 r = await client.get(src)
                 if r.status_code == 200 and r.content:
@@ -237,6 +240,7 @@ async def _proxy_asset(clone_id: str, path: str) -> Response:
     origin = "/".join(base.split("/")[:3])
     url = f"{origin}/{path.lstrip('/')}"
     try:
+        await asyncio.to_thread(urlguard.check_url, url)   # 回源同样受 SSRF 策略约束
         client = _origin_client()
         r = await client.get(url, headers={"Referer": base})
         if r.status_code != 200 or not r.content:

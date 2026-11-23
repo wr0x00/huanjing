@@ -128,28 +128,71 @@ def _kill_orphans(site_id: str):
         pass
 
 
-def _kill_port(port: int, site_id: str = ""):
-    """按端口强杀监听进程：孤儿的命令行往往只是 `python app.py`，
-    路径匹配杀不到；端口属于站点，按 netstat 清杀才可靠"""
+def _proc_cmdlines(pids: set[str]) -> dict[str, str]:
+    """查询一批 PID 的命令行（用于判断端口占用者是否属于本项目）"""
+    ids = ",".join(sorted(str(int(p)) for p in pids if str(p).isdigit()))
+    if not ids:
+        return {}
+    ps = (f"$ids = @({ids}); "
+          "Get-CimInstance Win32_Process | Where-Object { $ids -contains $_.ProcessId } | "
+          "ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return {}
+    res: dict[str, str] = {}
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if "|" in line:
+            pid, _, cmd = line.partition("|")
+            res[pid.strip()] = cmd
+    return res
+
+
+def _kill_port(port: int, site_id: str = "") -> list[str]:
+    """按端口清理监听进程，但**只终止可确认属于本项目该实例的进程**。
+
+    归属判定：命令行包含本实例工作区路径（data/instances/<site_id>）——
+    框架启动器 argv 一定带实例路径，因此本项目的孤儿可被准确识别。
+    无法确认归属的占用者一律不强杀（避免误杀无关程序），只广播冲突提示。
+    返回未能清理的外部占用 PID 列表。
+    """
     if not port:
-        return
+        return []
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
                              timeout=12).stdout
-        pids = set()
-        for line in out.splitlines():
-            if f":{port} " in line and "LISTENING" in line.upper():
-                parts = line.split()
-                if parts and parts[-1].isdigit() and parts[-1] != "0":
-                    pids.add(parts[-1])
-        for pid in pids:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
-                           capture_output=True, timeout=10)
-        if pids:
-            events.broadcast("instance.orphan_killed", site_id, "-",
-                             f"强杀占用端口 {port} 的孤儿监听进程 pid={','.join(pids)}")
     except Exception:
-        pass
+        return []
+    pids = set()
+    for line in (out or "").splitlines():
+        if f":{port} " in line and "LISTENING" in line.upper():
+            parts = line.split()
+            if parts and parts[-1].isdigit() and parts[-1] != "0":
+                pids.add(parts[-1])
+    if not pids:
+        return []
+    cmds = _proc_cmdlines(pids)
+    pat = str(instance_dir(site_id)).lower() if site_id else ""
+    mine, foreign = [], []
+    for pid in pids:
+        cmd = (cmds.get(pid) or "").lower()
+        if pat and pat in cmd:
+            mine.append(pid)
+        else:
+            foreign.append(pid)
+    for pid in mine:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                       capture_output=True, timeout=10)
+    if mine:
+        events.broadcast("instance.orphan_killed", site_id, "-",
+                         f"强杀占用端口 {port} 的本项目孤儿监听进程 pid={','.join(mine)}")
+    if foreign:
+        events.broadcast("instance.port_conflict", site_id, "-",
+                         f"端口 {port} 被其他程序占用（pid={','.join(foreign)}），"
+                         f"非本项目进程，已跳过强制终止，请手动释放后重试")
+    return foreign
 
 
 def template_dir(template_id: str) -> Path:
@@ -187,7 +230,8 @@ def deploy(site_id: str, port: int, template_id: str, full_reset: bool = False) 
         return {"ok": False, "error": f"模板 {template_id} 缺少 backend/app.py"}
     dst = instance_dir(site_id)
     stop(site_id, kill_orphan=True)
-    _kill_port(port, site_id)   # 孤儿可能命令行不带路径，按端口再清一次（释放日志句柄/端口）
+    # 端口清理：只终止可确认属于本项目该实例的进程（外部占用者不强杀）
+    _kill_port(port, site_id)
     if full_reset and dst.exists():
         # Windows 下句柄释放有延迟，rmtree 重试几次
         for _ in range(4):
@@ -248,18 +292,24 @@ def start(site_id: str, port: int) -> int | None:
             _lasterr[site_id] = "连续 3 次启动失败已熔断；修复 backend/app.py 后自动重试"
             return None
     stop(site_id, kill_orphan=True)
-    # 上一代孤儿可能仍占着端口（启动器命令行不再含实例路径，按端口清杀最可靠）
+    # 上一代孤儿可能仍占着端口：只清理可确认属于本项目该实例的进程，
+    # 外部程序占用只报告不强杀（避免误杀无关服务）
+    foreign: list[str] = []
     if _port_listening(port) or not _port_bindable(port):
-        _kill_port(port, site_id)
+        foreign = _kill_port(port, site_id)
     # 等端口真正可绑定（Windows 上旧监听被杀后仍会短暂占用 → 直接起会 EADDRINUSE）
     for _ in range(40):
         if _port_bindable(port):
             break
         time.sleep(0.2)
     if not _port_bindable(port):
-        _lasterr[site_id] = f"端口 {port} 被其他进程占用，无法启动"
+        if foreign:
+            _lasterr[site_id] = (f"端口 {port} 被其他程序占用"
+                                 f"（pid={','.join(foreign)}），非本项目进程未强制终止，请手动释放")
+        else:
+            _lasterr[site_id] = f"端口 {port} 被其他进程占用，无法启动"
         events.broadcast("instance.crash", site_id, "-",
-                         f"实例启动失败：端口 {port} 被占用（请先释放该端口）")
+                         f"实例启动失败：{_lasterr[site_id]}")
         return None
     logf = (be / "instance.stdout.log").open("ab")
     env = {**os.environ, "HP_SITE_PORT": str(port), "HP_SITE_HOST": "127.0.0.1"}

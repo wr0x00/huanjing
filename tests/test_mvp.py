@@ -168,7 +168,7 @@ def test_asset_no_growth():
 def test_commander_clone(monkeypatch):
     """指挥模型复刻：解析 file 块 → 落盘 → index.html 入库 SiteGraph"""
     import asyncio
-    from honeypot import cloner
+    from honeypot import cloner, urlguard
     llm_out = ('```file:index.html\n<!DOCTYPE html><html><head><style>body{color:#123}'
                'nav a{margin:8px}.card{border:1px solid #eee;padding:16px}</style>'
                '</head><body><nav><a href="/">首页</a><a href="/login">登录</a></nav>'
@@ -181,6 +181,8 @@ def test_commander_clone(monkeypatch):
         return llm_out, "test-provider"
     monkeypatch.setattr(cloner.llm_gateway, "chat", fake_chat)
     monkeypatch.setattr(cloner.growth, "dlp_scan", lambda x: x)
+    # 离线测试：把域名解析固定到一个公网 IP，绕过真实 DNS（SSRF 策略照常生效）
+    monkeypatch.setattr(urlguard, "resolve_host", lambda host: ["93.184.216.34"])
     import httpx as _hx
     class FakeResp:
         text = "<html><title>Target Portal</title><body>hello</body></html>"

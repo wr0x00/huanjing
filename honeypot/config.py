@@ -55,6 +55,14 @@ WEAK_CREDENTIALS = [
     ("admin", "987987"),
 ]
 
+# 出站白名单（SSRF 防护豁免）：登记在册的自有资产主机名可放行，
+# 未登记的主机一律拒绝解析到内网/保留地址。逗号分隔。
+ALLOWED_OUTBOUND_HOSTS = {
+    h.strip().lower()
+    for h in os.getenv("HP_ALLOWED_OUTBOUND_HOSTS", "").split(",")
+    if h.strip()
+}
+
 # ---- 入口端口：靶站（攻击者视角，生产换域名+反代）与管理端分离 ----
 SITE_PORT = int(os.getenv("HP_SITE_PORT", "8888"))
 CONSOLE_PORT = int(os.getenv("HP_CONSOLE_PORT", "9000"))
