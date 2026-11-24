@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>蜜罐指挥中心 · AI Honeypot</title>
-<link rel="stylesheet" href="/static/styles.css?v=11">
+<link rel="stylesheet" href="/static/styles.css?v=12">
 <script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/charts.js?v=2"></script>
 </head>
@@ -323,15 +323,15 @@ const Live = {template:`
     <div class="actions"><button class="btn" @click="live.events=[]">清空缓冲</button></div>
   </div>
 
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px;align-items:start">
+  <div class="chat-grid">
   <!-- 克隆模板任务对话框（左）：LLM 回复/状态实时上屏，可指挥与暂停 -->
-  <div class="card" v-if="cloneKeys.length">
-    <div class="card-head"><h2 class="card-title">克隆模板任务 · LLM 对话框</h2>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
+  <div class="card chat-card" v-if="cloneKeys.length">
+    <div class="card-head chat-head"><h2 class="card-title">克隆模板任务 · LLM 对话框</h2>
+      <div class="chat-tags">
         <span v-for="cid in cloneKeys" :key="cid" class="tag" :class="cid===curCloneCid?'tag-blue':'tag-gray'"
               style="cursor:pointer" @click="curCloneCid=cid">{{chats[cid].title||cid}}<template v-if="chats[cid].running"> ●</template></span></div></div>
-    <div class="card-body" v-if="curClone">
-      <div class="row" style="margin-bottom:10px;align-items:center">
+    <div class="card-body chat-body" v-if="curClone">
+      <div class="row chat-bar">
         <span :class="curClone.running?'tag tag-orange':'tag tag-gray'">{{curClone.running?"任务运行中 · LLM 工作直播":"任务已结束"}}</span>
         <span class="sp"></span>
         <button class="btn btn-sm danger" :disabled="!curClone.running" @click="pauseCur('clone')">
@@ -341,7 +341,7 @@ const Live = {template:`
           <div class="cc-bubble"><span class="cc-caret" v-if="m.role==='assistant' && m.open!==false">▍</span>{{decodeEnt(m.text)}}</div></div>
         <div v-if="!curClone.msgs.length" class="empty">等待任务产出…</div>
       </div>
-      <div class="row" style="margin-top:10px">
+      <div class="row chat-input">
         <input class="input" v-model="chatInputClone" style="flex:1"
                placeholder="给 LLM 下指令：立即回应并注入下一阶段（如：登录接口做假 token）"
                @keyup.enter="sendCmd('clone')">
@@ -349,30 +349,30 @@ const Live = {template:`
     </div></div>
 
   <!-- 靶站管理对话框（右）：独立于左侧克隆模板任务，列出全部真实靶站并可指挥其自生长 -->
-  <div class="card" v-if="siteKeys.length">
-    <div class="card-head"><h2 class="card-title">靶站管理 · LLM 对话框（自生长）</h2>
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
+  <div class="card chat-card" v-if="siteKeys.length">
+    <div class="card-head chat-head"><h2 class="card-title">靶站管理 · LLM 对话框（自生长）</h2>
+      <div class="chat-tags">
         <span v-for="cid in siteKeys" :key="cid" class="tag" :class="cid===curSiteCid?'tag-green':'tag-gray'"
               style="cursor:pointer" @click="curSiteCid=cid" :title="chats[cid].sid">{{chats[cid].title||cid}}</span></div></div>
-    <div class="card-body" v-if="curSite">
-      <div class="row" style="margin-bottom:10px;align-items:center">
+    <div class="card-body chat-body" v-if="curSite">
+      <div class="row chat-bar">
         <span class="tag" :class="curSite.status==='running'?'tag-green':(curSite.status==='engine'?'tag-blue':'tag-orange')"
               :title="curSite.error||'站点状态'">
           {{curSite.sid}} · :{{curSite.port}} ·
           {{curSite.status==="running"?(curSite.listening?"运行中":(curSite.error?"启动失败":"进程存活"))
             :(curSite.status==="engine"?"拟真引擎":"已停止")}}</span>
-        <span class="tag tag-green">自生长助手 · 依据攻击态势生长站点，可增删改查文件并自动重启</span>
+        <span class="tag tag-green chat-hint" title="依据攻击态势生长站点，可增删改查文件并自动重启">自生长助手</span>
         <span class="sp"></span>
         <button class="btn btn-sm" @click="pauseCur('site')">重启站点</button></div>
-      <details class="cc-think" v-if="curSite.think">
-        <summary>模型思考过程（{{curSite.think.length}} 字）</summary>
-        <div class="cc-think-body">{{curSite.think}}</div></details>
       <div class="cc-log" ref="cclogSite">
+        <details class="cc-think" v-if="curSite.think">
+          <summary>模型思考过程（{{curSite.think.length}} 字）</summary>
+          <div class="cc-think-body">{{curSite.think}}</div></details>
         <div v-for="(m,i) in curSite.msgs" :key="i" class="cc-msg" :class="'cc-'+m.role">
           <div class="cc-bubble"><span class="cc-caret" v-if="m.role==='assistant' && m.open!==false">▍</span>{{decodeEnt(m.text)}}</div></div>
         <div v-if="!curSite.msgs.length" class="empty">等待助手产出…</div>
       </div>
-      <div class="row" style="margin-top:10px">
+      <div class="row chat-input">
         <input class="input" v-model="chatInputSite" style="flex:1"
                placeholder="指挥靶站生长：如「给攻击者生成假后台」「加一个会员中心诱饵页」"
                @keyup.enter="sendCmd('site')">

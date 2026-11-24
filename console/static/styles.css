@@ -2288,3 +2288,105 @@ pre.rpt {
     font-family: var(--mono);
     line-height: 1.55;
 }
+
+/* ============================================================
+   会话直播：左右两个 LLM 对话框严格对齐
+   —— 同高、同头部结构、同日志高度、同输入行基线
+   （全部限定在 .chat-grid 内，避免误伤实例弹窗的同名类）
+   ============================================================ */
+.chat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 16px;
+    align-items: stretch;   /* 两张卡片等高，底部齐平 */
+}
+
+.chat-grid > .chat-card {
+    margin-top: 0;         /* 抵消 .card+.card 的 16px 上边距，保证两卡顶部齐平 */
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* 头部统一为「标题行 + 标签行」两行结构，两卡头部等高 */
+.chat-grid .chat-head {
+    flex: none;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: nowrap;
+}
+
+.chat-grid .chat-tags {
+    display: flex;
+    gap: 6px;
+    width: 100%;
+    align-items: center;
+    flex-wrap: nowrap;      /* 单行不换行：两卡头部高度恒定 */
+    overflow-x: auto;       /* 标签过多时横向滚动，不挤高卡片 */
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+.chat-grid .chat-tags::-webkit-scrollbar {
+    display: none;
+}
+.chat-grid .chat-tags > .tag {
+    flex: none;
+}
+
+/* 状态条固定一行：超长标签省略，不换行挤高卡片 */
+.chat-grid .chat-bar {
+    flex: none;
+    flex-wrap: nowrap;
+    align-items: center;
+    min-height: 26px;
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+
+/* 标签可压缩，按钮固定不被挤出 */
+.chat-grid .chat-bar > .tag {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-flex;
+}
+.chat-grid .chat-bar > .btn {
+    flex: none;
+}
+
+.chat-grid .chat-hint {
+    max-width: 46%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-flex;
+}
+
+/* 主体吸收剩余高度：日志框严格等高，输入行贴底对齐 */
+.chat-grid .chat-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 日志区：两侧同一起点同一起终（等高），内容超出时各自内部滚动 */
+.chat-grid .chat-body .cc-log {
+    flex: 1 1 46vh;
+    height: auto;
+    min-height: 240px;
+    max-height: none;
+}
+
+.chat-grid .chat-input {
+    flex: none;
+    margin-top: 10px;
+}
+
+.chat-grid .chat-body .cc-think {
+    flex: none;
+    margin-bottom: 10px;
+}
